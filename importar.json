@@ -1,0 +1,181 @@
+{
+  "perfil": {
+    "renda_mensal_esperada": "1796.01",
+    "meta_poupanca_mensal": "500.00",
+    "observacoes_planejamento": "Controle atualizado até 2026-10-19. Novo emprego com salário bruto de R$1870.00, adiantamento de R$935.00 recebido em 2026-10-15 e complemento estimado de R$850.00 no fim do mês. A renda líquida mensal anteriormente estimada é R$1726.01, mais R$70.00 de renda extra fixa, totalizando R$1796.01 mensais, sujeita à confirmação pela folha. O pagamento do novo emprego ocorre quinzenalmente, com adiantamento por volta do dia 15 e complemento no fim do mês. O contrato municipal tem salário-base informado de R$1621.00; há previsão de recebimento desse valor mais um terço de férias, com desconto estimado de 9%, total líquido estimado de R$1966.81, ainda não recebido nem confirmado. O usuário informou que todas as despesas de outubro estavam pagas em 2026-10-15. O saldo real informado mais recentemente é R$530.00 em 2026-10-19. Despesas fixas mensais controladas: faculdade principal R$570.00, aluguel R$200.00, cabelo R$140.00, internet R$35.00 e transporte R$40.00. A segunda faculdade não é fixa e deve ser lançada apenas quando houver cobrança. Planejamento anterior sugeriu preservar pelo menos R$500.00 em caixa, evitar novos empréstimos caros e não antecipar novas parcelas enquanto o saldo estiver baixo. Quando houver recebimentos, priorizar contas essenciais e compromissos de novembro, manter reserva e depois avaliar quitação antecipada de dívidas com juros altos, verificando o desconto real no aplicativo. O usuário não definiu explicitamente uma meta de poupança mensal de R$500.00; esse valor é uma meta provisória para estruturar o orçamento, não um compromisso confirmado. Benefícios não monetários do novo emprego não foram contabilizados como renda. Não incluir receitas futuras como dinheiro disponível até serem recebidas."
+  },
+  "transacoes": [
+    {
+      "tipo": "receita",
+      "valor": "2236.99",
+      "categoria": "Salário",
+      "descricao": "Pagamento recebido da Prefeitura em 2026-09-30, conforme extrato bancário",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "100.19",
+      "categoria": "Educação",
+      "descricao": "Pix para Pagar.me Pagamentos, identificado pelo usuário como cobrança de outra faculdade não fixa",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "7.52",
+      "categoria": "Educação",
+      "descricao": "Pix para Pagar.me Pagamentos, identificado pelo usuário como cobrança de outra faculdade não fixa",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "401.60",
+      "categoria": "Empréstimos",
+      "descricao": "Pagamento para Maree Instituição de Pagamento, referente a obrigações Shopee/Maree conforme controle financeiro",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "318.00",
+      "categoria": "Não identificada",
+      "descricao": "Pix para Joanna Marques de Oliveira; finalidade exata não confirmada",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "140.00",
+      "categoria": "Cuidados pessoais",
+      "descricao": "Pix para Karolaine Siqueira Costa dos Santos; associado ao gasto de cabelo no controle, embora a correspondência exata não tenha sido confirmada",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "90.00",
+      "categoria": "Dívidas",
+      "descricao": "Pix para Daniel Abreu de Lima, associado ao pagamento da dívida de Dan",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "200.00",
+      "categoria": "Não identificada",
+      "descricao": "Pix para Anderson Santos de Melo Nunes; finalidade exata não confirmada",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "100.00",
+      "categoria": "Vestuário ou dívida",
+      "descricao": "Pix para Maria Almeida de Carvalho; associado a pagamento de obrigação, mas a finalidade exata não foi confirmada",
+      "data": "2026-09-30"
+    },
+    {
+      "tipo": "receita",
+      "valor": "935.00",
+      "categoria": "Salário",
+      "descricao": "Adiantamento quinzenal do novo emprego recebido",
+      "data": "2026-10-15"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "290.97",
+      "categoria": "Empréstimos",
+      "descricao": "Antecipação paga da parcela Shopee originalmente no valor de R$313.08, com desconto de R$22.11",
+      "data": "2026-10-15"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "86.66",
+      "categoria": "Cartão de crédito",
+      "descricao": "Pagamento parcial da fatura de novembro, cujo total original previsto era R$249.00",
+      "data": "2026-10-15"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "60.00",
+      "categoria": "Despesas extras",
+      "descricao": "Custo extra, sem categoria específica informada",
+      "data": "2026-10-15"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "167.37",
+      "categoria": "Entretenimento e despesas diversas",
+      "descricao": "Diferença entre o saldo anteriormente informado de R$697.37 e o saldo atualizado de R$530.00; valor inferido como gasto adicional, sem confirmação de que todo o valor foi exclusivamente entretenimento",
+      "data": "2026-10-19"
+    }
+  ],
+  "contas_a_pagar": [
+    {
+      "titulo": "Faculdade principal",
+      "valor_total": "570.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-01"
+    },
+    {
+      "titulo": "Aluguel",
+      "valor_total": "200.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-04"
+    },
+    {
+      "titulo": "Cabelo",
+      "valor_total": "140.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-15"
+    },
+    {
+      "titulo": "Internet",
+      "valor_total": "35.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Transporte",
+      "valor_total": "40.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Empréstimo Shopee/Maree",
+      "valor_total": "81.31",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-03"
+    },
+    {
+      "titulo": "SParcelado Shopee",
+      "valor_total": "136.87",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-06"
+    },
+    {
+      "titulo": "Empréstimo Shopee/Maree",
+      "valor_total": "232.43",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-10"
+    },
+    {
+      "titulo": "Cartão de crédito",
+      "valor_total": "249.00",
+      "valor_pago": "86.66",
+      "vencimento": "2026-11-05"
+    },
+    {
+      "titulo": "Dívida de roupas — última parcela",
+      "valor_total": "100.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Dívida de roupas — segunda dívida",
+      "valor_total": "100.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Dívida de perfume",
+      "valor_total": "100.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-30"
+    }
+  ]
+}
