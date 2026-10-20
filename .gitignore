@@ -2,8 +2,8 @@
 .venv/
 data/*
 !data/.gitkeep
-!data/financeai.sqlite3
 logs/*
 !logs/.gitkeep
 __pycache__/
 *.pyc
+importar.json
