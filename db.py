@@ -353,7 +353,7 @@ def ai_context():
         lines.append('')
         lines.append('=== PERFIL FINANCEIRO DO USUÁRIO (DADOS CONFIRMADOS) ===')
         if 'renda_fixa' in profile:
-            lines.append(f'RENDA FIXA MENSAL (TODOS OS MESES):')
+            lines.append('RENDA FIXA MENSAL (TODOS OS MESES):')
             lines.append(profile['renda_fixa'])
         elif 'renda_mensal_esperada' in profile:
             lines.append(f"Renda mensal total esperada: R$ {profile['renda_mensal_esperada']}")

@@ -351,8 +351,8 @@ async def history(update, context):
     lines=['ÚLTIMAS MOVIMENTAÇÕES:']
     for t in transactions:
         emoji='➕' if t['kind']=='receita' else '➖'
-        lines.append(f'{emoji} #{t["id"]} {db.short_date(t["occurred_at"])} {db.brl(t["amount"])} | {t["category"]} | {t["description"]}')
-    await say(update,'\n'.join(lines))
+        lines.append(f'{emoji} #{t["id"]} {db.short_date(t["occurred_at"])} {db.brl(t["amount"])} | {t["category"]} | {t["description"]}\n')
+    await say(update, '\n'.join(lines))
 
 
 async def report(update, context):
