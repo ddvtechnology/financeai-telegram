@@ -22,12 +22,21 @@ ESTILO DE RESPOSTA:
   • Para itálico, use sublinhado (_exemplo_).
 
 DADOS E REGRAS ANTI-ALUCINAÇÃO:
-- Baseie-se estritamente nos dados cadastrados no aplicativo e no perfil do usuário.
+- Baseie-se estritamente nos dados cadastrados no aplicativo e no perfil do usuário fornecidos no contexto.
 - NUNCA invente receitas, freelas, salários fictícios (ex: R$ 3.500, freela R$ 1.200) ou datas que não estejam no perfil ou no banco de dados.
+- NUNCA faça perguntas sobre valores ou receitas que JÁ CONSTAM no perfil financeiro (ex: salário, adiantamento, complemento, contrato municipal). Use os dados fornecidos!
+- NUNCA peça desculpas dizendo que 'não tem acesso ao banco de dados neste chat' nem aja como se estivesse sem os dados, pois você tem os dados fornecidos no contexto do sistema.
 - Se o usuário perguntar quanto tem a receber em determinado mês:
-  • Se o perfil tiver estimativa registrada (ex: salário fixo de R$ 1.870 bruto ou parcelas quinzenais informadas no perfil), cite apenas os dados que constam nas observações/perfil.
-  • Se NÃO houver previsão de receita cadastrada para aquele mês, declare expressamente que não há receitas agendadas cadastradas e pergunte se ele quer registrar alguma.
-- NUNCA peça desculpas dizendo que 'não tem acesso ao banco de dados neste chat' nem aja como se estivesse sem os dados, pois você tem os dados fornecidos no contexto do sistema.'''
+  • Consulte as seções 'RENDA FIXA', 'RECEITAS ÚNICAS' e 'PREVISÃO DE RECEITAS' do perfil.
+  • Diferencie claramente o que JÁ FOI RECEBIDO do que AINDA FALTA RECEBER na data da mensagem.
+  • Em Outubro/2026:
+    - O adiantamento de R$ 935,00 já foi recebido em 15/10/2026.
+    - Falta receber em 30/10/2026: Complemento do salário (~R$ 850,00) e Contrato Municipal único (R$ 1.966,81 estimado).
+    - Total a receber restante em Outubro: R$ 2.816,81.
+  • Em Novembro/2026:
+    - Receitas previstas: Adiantamento dia 15/11 (R$ 935,00) e Complemento dia 30/11 (R$ 850,00).
+    - Total previsto para Novembro: R$ 1.785,00 (ou R$ 1.855,00 com renda extra fixa de R$ 70).
+    - O Contrato Municipal NÃO se repete em Novembro (foi parcela única em Outubro).'''
 
 INTERPRETER_SYSTEM = r'''Você é o interpretador de mensagens de um assistente financeiro pessoal. O usuário fala em português brasileiro, informalmente. Sua única saída deve ser UM objeto JSON válido, sem Markdown, sem comentários e sem texto antes/depois.
 
@@ -44,7 +53,6 @@ Formato obrigatório:
   "reminder_at": "AAAA-MM-DDTHH:MM ou null",
   "query": "balance|debts|report|history|plan|reminders|help|null",
   "question": "pergunta curta para completar dados, ou string vazia",
-  "reply": "resposta curta opcional para conversa normal, ou string vazia",
   "confidence": 0.0,
   "full_payment": false
 }
@@ -172,11 +180,15 @@ def _extract_json(text):
 
 
 def needs_financial_context(text):
-    plain = re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
-    return bool(re.search(
-        r'\b(saldo|gasto|gastei|gastos|receita|receitas|despesa|despesas|conta|contas|divida|dividas|quanto|sobrou|relatorio|mes|economiz|planej|extrato|orcamento|fatura|pagar|paguei)\b',
-        plain
-    ))
+    greetings = {
+        'oi', 'ola', 'olá', 'bom dia', 'boa tarde', 'boa noite',
+        'opa', 'e ai', 'e aí', 'tudo bem', 'tudo bom',
+        'obrigado', 'obrigada', 'valeu', 'tchau', 'ate logo', 'até logo'
+    }
+    clean = re.sub(r'[^a-z0-9áéíóúãõâêîôûç]+', ' ', text.lower()).strip()
+    if clean in greetings:
+        return False
+    return True
 
 
 async def interpret_message(prompt, pending=None):

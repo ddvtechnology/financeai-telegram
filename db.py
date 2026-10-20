@@ -341,23 +341,42 @@ def ai_context():
     debts = get_debts()[:20]
     tx = get_transactions(15)
     profile = get_profile()
-    lines = [f"Mês: {s['month']}; receitas: {brl(s['receita'])}; despesas: {brl(s['despesa'])}; saldo histórico registrado: {brl(s['total'])}.",
-             'OBS: saldo histórico NÃO é saldo bancário; não há acesso a banco financeiro real.']
+    lines = [
+        f"Mês atual: {s['month']}",
+        f"Receitas registradas no mês: {brl(s['receita'])}",
+        f"Despesas registradas no mês: {brl(s['despesa'])}",
+        f"Saldo histórico registrado (todas as movimentações): {brl(s['total'])}",
+    ]
+
+    # Perfil estruturado — dados de renda e planejamento
     if profile:
-        profile_parts = []
-        if 'renda_mensal_esperada' in profile:
-            profile_parts.append(f"Renda/Salário esperado: R$ {profile['renda_mensal_esperada']}")
+        lines.append('')
+        lines.append('=== PERFIL FINANCEIRO DO USUÁRIO (DADOS CONFIRMADOS) ===')
+        if 'renda_fixa' in profile:
+            lines.append(f'RENDA FIXA MENSAL (TODOS OS MESES):')
+            lines.append(profile['renda_fixa'])
+        elif 'renda_mensal_esperada' in profile:
+            lines.append(f"Renda mensal total esperada: R$ {profile['renda_mensal_esperada']}")
+        if 'renda_unica' in profile:
+            lines.append('RECEITAS ÚNICAS (NÃO RECORRENTES):')
+            lines.append(profile['renda_unica'])
+        if 'previsao_meses' in profile:
+            lines.append('PREVISÃO DE RECEITAS POR MÊS:')
+            lines.append(profile['previsao_meses'])
         if 'meta_poupanca_mensal' in profile:
-            profile_parts.append(f"Meta de poupança mensal: R$ {profile['meta_poupanca_mensal']}")
+            lines.append(f"Meta de poupança mensal: R$ {profile['meta_poupanca_mensal']}")
         if 'observacoes_planejamento' in profile:
-            profile_parts.append(f"Diretrizes/Planos: {profile['observacoes_planejamento']}")
-        if profile_parts:
-            lines.append('Perfil e Metas do Usuário: ' + ' | '.join(profile_parts))
-    lines.append('Dívidas abertas:')
+            lines.append(f"Observações: {profile['observacoes_planejamento']}")
+        lines.append('=== FIM DO PERFIL ===')
+
+    lines.append('')
+    lines.append('Dívidas/contas abertas:')
     lines += [f"- #{d['id']} {d['title']}: falta {brl(d['original_amount']-d['paid_amount'])}; vence {short_date(d['due_date'])}" for d in debts] or ['- Nenhuma cadastrada']
+    lines.append('')
     lines.append('Últimas movimentações:')
     lines += [f"- {t['kind']}: {brl(t['amount'])}, {t['category']}, {t['description'][:60]}" for t in tx] or ['- Nenhuma cadastrada']
     return '\n'.join(lines)
+
 
 
 def add_recurring(title, amount, day):

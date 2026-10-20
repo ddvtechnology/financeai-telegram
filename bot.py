@@ -66,10 +66,21 @@ async def guard(update):
 
 def clean_telegram_markdown(text):
     if not text: return text
-    # Converte marcadores de lista iniciados por asterisco (* item) em bullets (• item)
-    text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+    # Converte marcadores de lista iniciados por asterisco ou traço (* item ou - item) em bullets (• item)
+    text = re.sub(r'(?m)^\s*[\*\-]\s+', '• ', text)
     # Converte negrito padrão markdown (**texto**) em negrito do Telegram (*texto*)
-    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+    text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+    # Remove asteriscos órfãos com espaços ao redor (ex: " * " ou " *")
+    text = re.sub(r'(?<=\s)\*(?=\s)', '•', text)
+    # Se houver número ímpar de asteriscos *, remove o último asterisco solto para não quebrar o parser
+    if text.count('*') % 2 != 0:
+        idx = text.rfind('*')
+        text = text[:idx] + text[idx+1:]
+    # Escapa underscores isolados dentro de palavras (ex: variavel_nome -> variavel\_nome)
+    text = re.sub(r'(?<=\w)_(?=\w)', r'\_', text)
+    if text.count('_') % 2 != 0:
+        idx = text.rfind('_')
+        text = text[:idx] + text[idx+1:]
     return text
 
 
@@ -545,11 +556,6 @@ async def chat(update, context):
             return
 
         drafts.pop(user_id, None)
-        reply = str(result.get('reply') or '').strip()
-        if reply:
-            await say(update, reply)
-            return
-
         result_text = await ai.answer(prompt)
         await say(update, result_text)
     except RuntimeError as exc:
