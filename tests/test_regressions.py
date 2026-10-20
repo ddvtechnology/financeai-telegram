@@ -119,6 +119,40 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             db.add_recurring('X', 100, 31)
 
+    def test_clean_telegram_markdown(self):
+        sample = '**A receber em Outubro:**\n*   **Complemento salário:** ~R$ 850,00\n* Item de lista\n*dangling'
+        cleaned = bot.clean_telegram_markdown(sample)
+        self.assertIn('*A receber em Outubro:*', cleaned)
+        self.assertIn('• *Complemento salário:*', cleaned)
+        self.assertIn('• Item de lista', cleaned)
+        self.assertIn('dangling', cleaned)
+        self.assertEqual(cleaned.count('*') % 2, 0)
+
+        # Snake_case test
+        sc = 'valor_total e user_id'
+        cleaned_sc = bot.clean_telegram_markdown(sc)
+        self.assertIn(r'valor\_total', cleaned_sc)
+        self.assertIn(r'user\_id', cleaned_sc)
+
+    def test_needs_financial_context(self):
+        self.assertFalse(ai.needs_financial_context('Oi'))
+        self.assertFalse(ai.needs_financial_context('Boa tarde!'))
+        self.assertTrue(ai.needs_financial_context('quanto tenho a receber em novembro?'))
+        self.assertTrue(ai.needs_financial_context('faltou o restante do salario'))
+        self.assertTrue(ai.needs_financial_context('qual o meu saldo?'))
+
+    def test_ai_context_includes_profile_sections(self):
+        db.set_profile({
+            'renda_fixa': 'Salario CLT R$ 1.870,00',
+            'renda_unica': 'Contrato Municipal R$ 1.966,81 em 30/10',
+            'previsao_meses': 'Novembro: R$ 1.785,00'
+        })
+        ctx = db.ai_context()
+        self.assertIn('Salario CLT R$ 1.870,00', ctx)
+        self.assertIn('Contrato Municipal R$ 1.966,81 em 30/10', ctx)
+        self.assertIn('Novembro: R$ 1.785,00', ctx)
+
 
 if __name__ == '__main__':
     unittest.main()
+
