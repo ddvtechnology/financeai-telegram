@@ -548,6 +548,13 @@ async def chat(update, context):
             await prepare_natural_reminder(update, context, result, prompt, previous)
             return
         if intent == 'clarify':
+            if previous:
+                # Se já havia um pedido de esclarecimento anterior e não foi resolvido,
+                # não prende o usuário em loop infinito: descarta o rascunho e responde via IA conversacional.
+                drafts.pop(user_id, None)
+                result_text = await ai.answer(prompt)
+                await say(update, result_text)
+                return
             question = str(result.get('question') or '').strip() or 'Pode explicar um pouco melhor o que você quer registrar?'
             await store_clarification(update, context, prompt, result, question, previous)
             return
@@ -744,6 +751,15 @@ async def dispatch_natural_query(update, context, query):
     ):
         # Redireciona para resposta conversacional em vez de exibir o tutorial
         log.info('Guardrail: query help bloqueado para mensagem financeira: %.80s', prompt)
+        result_text = await ai.answer(prompt)
+        await say(update, result_text)
+        return True
+
+    # Guardrail: nunca disparar debt_list (debts) se a mensagem é sobre recebimento ou salário.
+    if str(query or '').strip().lower() == 'debts' and (
+        re.search(r'\b(receb|sal[aá]rio|complemento|adiantamento|ganh|renda|prefeitura|contrato|a receber)\b', prompt, re.I)
+    ):
+        log.info('Guardrail: query debts bloqueado para mensagem de recebimento: %.80s', prompt)
         result_text = await ai.answer(prompt)
         await say(update, result_text)
         return True

@@ -152,7 +152,16 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('Contrato Municipal R$ 1.966,81 em 30/10', ctx)
         self.assertIn('Novembro: R$ 1.785,00', ctx)
 
+    def test_dispatch_natural_query_blocks_debts_for_income(self):
+        upd = fake_update()
+        upd.message.text = '935 no dia 15/10 que já recebi, e o complemento 850, no dia 30/10 que ainda falta'
+        with mock.patch('ai.answer', return_value='Resposta mockada') as m_ans:
+            res = asyncio.run(bot.dispatch_natural_query(upd, SimpleNamespace(), 'debts'))
+            self.assertTrue(res)
+            m_ans.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
