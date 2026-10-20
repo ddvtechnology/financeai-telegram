@@ -63,9 +63,20 @@ async def guard(update):
     return False
 
 
+def clean_telegram_markdown(text):
+    if not text: return text
+    # Converte marcadores de lista iniciados por asterisco (* item) em bullets (• item)
+    text = re.sub(r'(?m)^\s*\*\s+', '• ', text)
+    # Converte negrito padrão markdown (**texto**) em negrito do Telegram (*texto*)
+    text = re.sub(r'\*\*(.*?)\*\*', r'*\1*', text)
+    return text
+
+
 async def say(update, text, keyboard=None, parse_mode='Markdown'):
     """Divide respostas mantendo o teclado persistente e suportando formatação Markdown/HTML."""
     markup = keyboard if keyboard is not None else main_keyboard()
+    if parse_mode == 'Markdown':
+        text = clean_telegram_markdown(text)
     chunks = [text[start:start+3900] for start in range(0, len(text), 3900)] or [text]
     for idx, chunk in enumerate(chunks):
         is_last = (idx == len(chunks) - 1)
