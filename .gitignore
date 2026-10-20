@@ -1,8 +1,8 @@
 .env
 .venv/
-data/*
-!data/.gitkeep
-!data/financeai.sqlite3
+# data/*
+# !data/.gitkeep
+# !data/financeai.sqlite3
 logs/*
 !logs/.gitkeep
 __pycache__/
