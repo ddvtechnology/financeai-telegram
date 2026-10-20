@@ -1,0 +1,37 @@
+{
+  "perfil": {
+    "renda_mensal_esperada": "3500.00",
+    "meta_poupanca_mensal": "500.00",
+    "observacoes_planejamento": "Salário recebido dia 05. Priorizar quitação de cartão de crédito e contas essenciais antes de investimentos."
+  },
+  "transacoes": [
+    {
+      "tipo": "receita",
+      "valor": "3500.00",
+      "categoria": "Salário",
+      "descricao": "Salário mensal",
+      "data": "2026-10-05"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "85.50",
+      "categoria": "Alimentação",
+      "descricao": "Supermercado",
+      "data": "2026-10-12"
+    }
+  ],
+  "contas_a_pagar": [
+    {
+      "titulo": "Aluguel",
+      "valor_total": "1200.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-10-28"
+    },
+    {
+      "titulo": "Fatura Cartão",
+      "valor_total": "450.00",
+      "valor_pago": "0.00",
+      "vencimento": "2026-11-05"
+    }
+  ]
+}
