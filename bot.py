@@ -727,6 +727,21 @@ async def prepare_natural_reminder(update, context, result, prompt, previous=Non
 
 async def dispatch_natural_query(update, context, query):
     """Encaminha consultas interpretadas a rotinas locais verificáveis."""
+    # Guardrail: nunca disparar help_cmd se a mensagem contém conteúdo financeiro.
+    # O classificador pode falhar — este bloqueio em código é o safety net definitivo.
+    prompt = (update.message.text or '') if update.message else ''
+    if str(query or '').strip().lower() == 'help' and (
+        re.search(r'R\$', prompt) or
+        re.search(r'\b(salário|salario|estimado|contrato|prefeitura|receber|complemento|'
+                  r'pagar|pagamento|dívida|divida|conta|despesa|receita|saldo|'
+                  r'dia\s+\d|^\d+º|útil|fatura|adiantamento|renda|empréstimo)\b', prompt, re.I)
+    ):
+        # Redireciona para resposta conversacional em vez de exibir o tutorial
+        log.info('Guardrail: query help bloqueado para mensagem financeira: %.80s', prompt)
+        result_text = await ai.answer(prompt)
+        await say(update, result_text)
+        return True
+
     handlers = {
         'balance': balance, 'debts': debt_list, 'report': report,
         'history': history, 'plan': plan, 'reminders': reminder_list,
