@@ -52,6 +52,7 @@ def import_financial_data(filepath):
     count_tx = 0
     count_debts = 0
     errors = []
+    skipped = []
 
     # Importar transações (receitas e despesas)
     for idx, tx in enumerate(transactions, 1):
@@ -71,6 +72,9 @@ def import_financial_data(filepath):
                 # Validar formato de data
                 date.fromisoformat(str(occurred_date))
 
+            if occurred_date and db.transaction_exists(kind, amount, category, description, str(occurred_date)):
+                skipped.append(f"Transação #{idx} já existe, ignorada: {category} {db.brl(amount)} em {occurred_date}")
+                continue
             txid = db.insert_transaction(
                 kind=kind,
                 amount=amount,
@@ -131,6 +135,8 @@ def import_financial_data(filepath):
     print(f"✅ Contas a pagar cadastradas: {count_debts}")
     if count_profile:
         print(f"✅ Metas e diretrizes de perfil salvas: {count_profile} campos")
+    if skipped:
+        print(f"↩️ Já existentes (ignoradas): {len(skipped)}")
     if errors:
         print(f"⚠️ Erros/avisos ({len(errors)}):")
         for err in errors:

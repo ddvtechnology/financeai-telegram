@@ -2,6 +2,7 @@
 import asyncio
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from config import MODELS, NVIDIA_URL, TZ_NAME
@@ -87,16 +88,25 @@ def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
     request = urllib.request.Request(NVIDIA_URL, data=json.dumps(body).encode('utf-8'),
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json', 'Accept':'application/json'},
         method='POST')
-    try:
-        with urllib.request.urlopen(request, timeout=100) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 401: raise RuntimeError('Chave NVIDIA inválida ou expirada (401).') from None
-        if exc.code == 403: raise RuntimeError('Acesso NVIDIA não autorizado para o modelo (403).') from None
-        if exc.code == 429: raise RuntimeError('Limite de requisições NVIDIA atingido (429).') from None
-        raise RuntimeError(f'API NVIDIA indisponível: HTTP {exc.code}.') from None
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError('Falha de conexão ou tempo excedido na NVIDIA.') from exc
+    data = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=100) as response:
+                data = json.load(response)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401: raise RuntimeError('Chave NVIDIA inválida ou expirada (401).') from None
+            if exc.code == 403: raise RuntimeError('Acesso NVIDIA não autorizado para o modelo (403).') from None
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(2 ** attempt)  # 1s, 2s (roda em thread via asyncio.to_thread)
+                continue
+            if exc.code == 429: raise RuntimeError('Limite de requisições NVIDIA atingido (429).') from None
+            raise RuntimeError(f'API NVIDIA indisponível: HTTP {exc.code}.') from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+                continue
+            raise RuntimeError('Falha de conexão ou tempo excedido na NVIDIA.') from exc
     try:
         answer = data['choices'][0]['message']['content']
         if isinstance(answer, list):

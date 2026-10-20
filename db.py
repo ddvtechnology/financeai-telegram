@@ -4,7 +4,6 @@ import re
 import sqlite3
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
-from pathlib import Path
 from config import DB_PATH, TZ
 
 
@@ -94,6 +93,14 @@ def init():
                 transaction_id INTEGER NOT NULL REFERENCES transactions(id),
                 amount INTEGER NOT NULL CHECK(amount>0),
                 paid_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS recurring_bills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount > 0),
+                day INTEGER NOT NULL CHECK(day BETWEEN 1 AND 28),
+                active INTEGER NOT NULL DEFAULT 1,
+                last_generated TEXT
             );
             CREATE TABLE IF NOT EXISTS reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -194,6 +201,31 @@ def remove_debt(debt_id):
         c.execute('DELETE FROM debts WHERE id=?', (debt_id,))
 
 
+def get_transaction(tx_id):
+    with conn() as c:
+        row = c.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_transaction(tx_id):
+    """Apaga um lançamento avulso. Lançamentos ligados a dívidas são protegidos."""
+    with conn() as c:
+        row = c.execute('SELECT debt_id FROM transactions WHERE id=?', (tx_id,)).fetchone()
+        if not row:
+            raise ValueError('Lançamento não encontrado.')
+        if row['debt_id']:
+            raise ValueError('Pagamento de dívida não pode ser apagado por aqui.')
+        c.execute('DELETE FROM transactions WHERE id=?', (tx_id,))
+
+
+def transaction_exists(kind, amount, category, description, day):
+    """Usado pela importação para não duplicar lançamentos idênticos no mesmo dia."""
+    with conn() as c:
+        return c.execute('''SELECT 1 FROM transactions WHERE kind=? AND amount=? AND category=?
+            AND description=? AND substr(occurred_at,1,10)=? LIMIT 1''',
+            (kind, amount, category.strip()[:70], description.strip()[:250], day)).fetchone() is not None
+
+
 def get_transactions(limit=15):
     with conn() as c:
         return [dict(r) for r in c.execute('SELECT * FROM transactions ORDER BY id DESC LIMIT ?', (limit,))]
@@ -276,7 +308,8 @@ def remember(role, content):
     with conn() as c:
         c.execute('INSERT INTO messages(role,content,created_at) VALUES(?,?,?)',
                   (role, content[:3000],now().isoformat()))
-        # Manter o histórico persistente; API só recebe últimas interações.
+        # Retenção: mantém só as 500 mensagens mais recentes (a API usa apenas as últimas 6).
+        c.execute('DELETE FROM messages WHERE id <= (SELECT MAX(id) FROM messages) - 500')
 
 
 def last_messages(n=8):
@@ -325,3 +358,28 @@ def ai_context():
     lines.append('Últimas movimentações:')
     lines += [f"- {t['kind']}: {brl(t['amount'])}, {t['category']}, {t['description'][:60]}" for t in tx] or ['- Nenhuma cadastrada']
     return '\n'.join(lines)
+
+
+def add_recurring(title, amount, day):
+    if amount <= 0 or not title.strip() or not 1 <= int(day) <= 28:
+        raise ValueError('Conta fixa inválida (dia entre 1 e 28).')
+    with conn() as c:
+        return c.execute('INSERT INTO recurring_bills(title,amount,day) VALUES(?,?,?)',
+                         (title.strip()[:180], amount, int(day))).lastrowid
+
+
+def generate_recurring(month=None):
+    """Cria a conta do mês para cada conta fixa ativa. Idempotente: roda quantas vezes quiser."""
+    month = month or now().strftime('%Y-%m')
+    created = []
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        rows = c.execute('''SELECT * FROM recurring_bills
+            WHERE active=1 AND (last_generated IS NULL OR last_generated < ?)''', (month,)).fetchall()
+        for r in rows:
+            due = f"{month}-{r['day']:02d}"
+            cur = c.execute('INSERT INTO debts(title,original_amount,due_date,created_at) VALUES(?,?,?,?)',
+                            (r['title'], r['amount'], due, now().isoformat()))
+            c.execute('UPDATE recurring_bills SET last_generated=? WHERE id=?', (month, r['id']))
+            created.append(cur.lastrowid)
+    return created

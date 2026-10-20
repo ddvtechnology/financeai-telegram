@@ -1,6 +1,7 @@
 """FinanceAI Telegram. Não realiza transferências; registros somente locais no SQLite."""
 import asyncio
 import csv
+import html
 try:
     import fcntl
 except ImportError:
@@ -15,10 +16,10 @@ import unicodedata
 from datetime import datetime, date
 from pathlib import Path
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
-                      ReplyKeyboardMarkup, Update)
+                      ReplyKeyboardMarkup)
 from telegram.constants import ChatType
-from telegram.ext import (Application, ApplicationBuilder, CallbackQueryHandler,
-                          CommandHandler, ContextTypes, MessageHandler, filters)
+from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
+                          CommandHandler, MessageHandler, filters)
 import ai
 import db
 from config import BASE, DB_PATH, OWNER_ID, TOKEN, TZ
@@ -126,9 +127,16 @@ async def store_clarification(update, context, prompt, result, question, previou
     await say(update, question)
 
 
+def purge_expired(store, ttl=600):
+    limit = db.now().timestamp() - ttl
+    for key in [k for k, v in store.items() if (v.get('created_at') if isinstance(v, dict) else v[2]) < limit]:
+        store.pop(key, None)
+
+
 async def ask_action_confirmation(update, context, action, message):
     nonce = secrets.token_hex(8)
     pending = context.application.bot_data.setdefault('natural_actions', {})
+    purge_expired(pending)
     pending[nonce] = {'action': action, 'created_at': db.now().timestamp()}
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton('✅ Confirmar registro', callback_data='nl:confirm:' + nonce),
@@ -169,6 +177,36 @@ async def movement(update, context):
         await ask_action_confirmation(update, context, action,
             f'Confira antes de registrar:\n\nTipo: {kind.capitalize()}\nValor: {db.brl(amount)}\nCategoria: {category}' + (f'\nDescrição: {description}' if description else '') + '\n\nPosso salvar no seu histórico financeiro?')
     except ValueError as exc: await say(update,str(exc))
+
+
+async def tx_delete(update, context):
+    if not await guard(update): return
+    m = re.match(r'^/apagar(?:@\w+)?\s+(\d+)\s*$', update.message.text.strip())
+    if not m:
+        await say(update, 'Formato: /apagar <id do lançamento>\nVeja os ids em /historico.'); return
+    tx = db.get_transaction(int(m.group(1)))
+    if not tx:
+        await say(update, 'Lançamento não encontrado.'); return
+    if tx['debt_id']:
+        await say(update, 'Este lançamento é pagamento de dívida e não pode ser apagado por aqui.'); return
+    action = {'type': 'tx_delete', 'tx_id': tx['id']}
+    await ask_action_confirmation(update, context, action,
+        f'Apagar este lançamento?\n\n#{tx["id"]} {tx["kind"].capitalize()} {db.brl(tx["amount"])}\n'
+        f'{tx["category"]} — {tx["description"]}\nData: {db.short_date(tx["occurred_at"])}')
+
+
+async def recurring_add(update, context):
+    if not await guard(update): return
+    m = re.match(r'^/fixa(?:@\w+)?\s+(\S+)\s+(\d{1,2})\s+(.+)$', update.message.text.strip(), re.S)
+    if not m:
+        await say(update, 'Formato: /fixa <valor> <dia do mês 1-28> <nome>\nExemplo: /fixa 570 10 Faculdade'); return
+    try:
+        rid = db.add_recurring(m.group(3), db.money_to_cents(m.group(1)), int(m.group(2)))
+        created = db.generate_recurring()
+        extra = ' Já gerei a conta deste mês.' if created else ''
+        await say(update, f'✅ Conta fixa #{rid} cadastrada: {m.group(3).strip()} — todo dia {int(m.group(2))}.{extra}')
+    except ValueError as exc:
+        await say(update, str(exc))
 
 
 async def balance(update, context):
@@ -747,6 +785,10 @@ async def natural_action_callback(update, context):
                 f'✅ Pagamento registrado para “{action["title"]}”: {db.brl(action["amount"])}.\n'
                 f'Restante: {db.brl(remaining)}\nSaldo histórico registrado: {db.brl(db.summary()["total"])}\n'
                 'Isso é apenas um registro no FinanceAI; não houve transferência bancária.')
+        elif action_type == 'tx_delete':
+            db.delete_transaction(int(action['tx_id']))
+            await query.edit_message_text(
+                f'🗑️ Lançamento #{action["tx_id"]} apagado.\nSaldo histórico registrado: {db.brl(db.summary()["total"])}')
         elif action_type == 'reminder':
             reminder_id = db.insert_reminder(action['due_at'], action['content'])
             reminder_time = datetime.fromisoformat(action['due_at']).astimezone(TZ)
@@ -767,6 +809,7 @@ async def reminder_worker(application):
     while True:
         try:
             if OWNER_ID:
+                db.generate_recurring()
                 for reminder in db.due_reminders():
                     try:
                         await application.bot.send_message(OWNER_ID,f'⏰ FinanceAI — lembrete #{reminder["id"]}\n{reminder["content"]}')
@@ -816,7 +859,7 @@ def main():
     routes={'id':show_id,'start':start,'ajuda':help_cmd,'receita':movement,'despesa':movement,
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
             'relatorio':report,'planejar':plan,'lembrete':reminder_add,'lembretes':reminder_list,
-            'modelo':mode_set,'backup':backup,'corrigir_conta':debt_edit,'excluir_conta':debt_delete}
+            'modelo':mode_set,'backup':backup,'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'fixa':recurring_add}
     for name, handler in routes.items():
         app.add_handler(CommandHandler(name,handler))
     app.add_handler(CallbackQueryHandler(payment_callback,pattern='^(pay|cancel):[a-f0-9]{16}$'))
