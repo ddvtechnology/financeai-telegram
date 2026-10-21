@@ -22,7 +22,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, MessageHandler, filters)
 import ai
 import db
-from config import BASE, DB_PATH, OWNER_ID, TOKEN, TZ
+from config import BASE, DB_PATH, MORNING_HOUR, OWNER_ID, TOKEN, TZ
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('financeai')
@@ -359,43 +359,16 @@ async def report(update, context):
     if not await guard(update): return
     month = context.args[0] if context.args else db.now().strftime('%Y-%m')
     try:
-        s = db.summary(month)
+        text = month_report_text(month)
     except ValueError as exc:
         await say(update, str(exc))
         return
 
-    year, month_num = month.split('-')
-    month_br = f'{month_num}/{year}'
+    month_br = f'{month[5:]}/{month[:4]}'
+    await say(update, text)
 
-    lines = [
-        f'📊 *RELATÓRIO FINANCEIRO — {month_br}*\n',
-        f'🟢 *Total de Receitas:* `{db.brl(s["receita"])}`',
-        f'🔴 *Total de Despesas:* `{db.brl(s["despesa"])}`',
-        f'💰 *Saldo em Caixa:* `{db.brl(s["total"])}`\n',
-        '📂 *Maiores Gastos por Categoria:*'
-    ]
-    if s['categories']:
-        for c in s['categories']:
-            lines.append(f'  • {c["category"]}: `{db.brl(c["total"])}`')
-    else:
-        lines.append('  • Nenhum gasto registrado neste mês.')
-
-    await say(update, '\n'.join(lines))
-
-    with db.conn() as c:
-        rows = c.execute('''SELECT id, kind, amount, category, description, occurred_at FROM transactions
-                            WHERE substr(occurred_at,1,7)=? ORDER BY id''', (month,)).fetchall()
-    if rows:
-        output = io.StringIO()
-        writer = csv.writer(output, delimiter=';')
-        writer.writerow(['ID', 'Tipo', 'Valor (R$)', 'Categoria', 'Descrição', 'Data'])
-        for r in rows:
-            dt_iso = r['occurred_at'][:10]
-            dt_br = db.short_date(dt_iso)
-            val_fmt = f'{r["amount"] / 100:.2f}'.replace('.', ',')
-            writer.writerow([r['id'], r['kind'].capitalize(), val_fmt, r['category'], r['description'], dt_br])
-        doc = io.BytesIO(output.getvalue().encode('utf-8-sig'))
-        doc.name = f'relatorio-{month_br.replace("/", "-")}.csv'
+    doc = build_csv(month)
+    if doc:
         await update.message.reply_document(doc, filename=doc.name, caption=f'📄 Extrato detalhado em planilha ({month_br})')
 
 
@@ -842,48 +815,156 @@ async def natural_action_callback(update, context):
         await query.edit_message_text('Ocorreu um erro ao registrar; confira o histórico antes de tentar novamente.')
 
 
-async def reminder_worker(application):
-    while True:
-        try:
-            if OWNER_ID:
-                db.generate_recurring()
-                # Lembretes manuais cadastrados pelo usuário
-                for reminder in db.due_reminders():
-                    try:
-                        await application.bot.send_message(
-                            OWNER_ID,
-                            f'⏰ *Lembrete #{reminder["id"]}*\n{reminder["content"]}',
-                            parse_mode='Markdown')
-                        db.mark_reminder(reminder['id'])
-                    except Exception as exc:
-                        log.warning('Falha de envio do lembrete #%s: %s', reminder['id'], type(exc).__name__)
+def month_report_text(month):
+    s = db.summary(month)
+    year, month_num = month.split('-')
+    lines = [
+        f'📊 *RELATÓRIO FINANCEIRO — {month_num}/{year}*\n',
+        f'🟢 *Total de Receitas:* `{db.brl(s["receita"])}`',
+        f'🔴 *Total de Despesas:* `{db.brl(s["despesa"])}`',
+        f'💰 *Saldo em Caixa:* `{db.brl(s["total"])}`\n',
+        '📂 *Maiores Gastos por Categoria:*'
+    ]
+    if s['categories']:
+        lines += [f'  • {c["category"]}: `{db.brl(c["total"])}`' for c in s['categories']]
+    else:
+        lines.append('  • Nenhum gasto registrado neste mês.')
+    return '\n'.join(lines)
 
-                # Alertas automáticos de dívidas próximas ou em atraso
-                for debt in db.get_debts_due_soon():
-                    if db.was_debt_notified(debt['id'], debt['alert_type']):
-                        continue
-                    days = debt['days_left']
-                    rem = db.brl(debt['remaining'])
-                    due_br = db.short_date(debt['due_date'])
-                    if days == 3:
-                        msg = f'📅 *Conta vencendo em 3 dias\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
-                    elif days == 1:
-                        msg = f'⚠️ *Conta vence amanhã\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
-                    elif days == 0:
-                        msg = f'🔴 *Conta vence HOJE\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
-                    else:
-                        msg = (f'❗ *Conta em atraso\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n'
-                               f'🗓 Venceu em: {due_br} ({abs(days)} dia{"s" if abs(days) > 1 else ""} atrás)')
-                    try:
-                        await application.bot.send_message(OWNER_ID, msg, parse_mode='MarkdownV2')
-                        db.mark_debt_notified(debt['id'], debt['alert_type'])
-                    except Exception as exc:
-                        log.warning('Falha ao enviar alerta de dívida #%s: %s', debt['id'], type(exc).__name__)
-        except asyncio.CancelledError:
-            raise
+
+def build_csv(month):
+    """CSV (BytesIO nomeado) das movimentações do mês, ou None se não houver."""
+    rows = db.month_transactions(month)
+    if not rows:
+        return None
+    year, month_num = month.split('-')
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=';')
+    writer.writerow(['ID', 'Tipo', 'Valor (R$)', 'Categoria', 'Descrição', 'Data'])
+    for r in rows:
+        val_fmt = f'{r["amount"] / 100:.2f}'.replace('.', ',')
+        writer.writerow([r['id'], r['kind'].capitalize(), val_fmt, r['category'],
+                         r['description'], db.short_date(r['occurred_at'][:10])])
+    doc = io.BytesIO(output.getvalue().encode('utf-8-sig'))
+    doc.name = f'relatorio-{month_num}-{year}.csv'
+    return doc
+
+
+def format_morning(data):
+    """Texto HTML do resumo matinal."""
+    s = data['summary']
+    lines = ['☀️ <b>Bom dia! Resumo do seu dia</b>\n',
+             f'💰 Saldo registrado: <code>{html.escape(db.brl(s["total"]))}</code>',
+             f'🟢 Receitas do mês: <code>{html.escape(db.brl(s["receita"]))}</code>',
+             f'🔴 Despesas do mês: <code>{html.escape(db.brl(s["despesa"]))}</code>\n']
+    if data['debts']:
+        lines.append('📅 <b>Contas (atrasadas e próximos 7 dias):</b>')
+        for d in data['debts']:
+            n = d['days_left']
+            when = (f'atrasada há {-n} dia{"s" if n < -1 else ""}' if n < 0
+                    else 'vence HOJE' if n == 0 else 'vence amanhã' if n == 1 else f'vence em {n} dias')
+            lines.append(f'• {html.escape(str(d["title"]))} — {html.escape(db.brl(d["remaining"]))} ({when}, {db.short_date(d["due_date"])})')
+    else:
+        lines.append('📅 Nenhuma conta vencendo nos próximos 7 dias. 🎉')
+    if data['reminders']:
+        lines.append('\n⏰ <b>Lembretes de hoje:</b>')
+        for r in data['reminders']:
+            hour = datetime.fromisoformat(r['due_at']).astimezone(TZ).strftime('%H:%M')
+            lines.append(f'• {hour} — {html.escape(r["content"])}')
+    return '\n'.join(lines)
+
+
+async def daily_jobs(application):
+    """Resumo matinal (1x/dia) e relatório do mês anterior (1x/mês, nos primeiros dias)."""
+    moment = db.now()
+    if moment.hour < MORNING_HOUR:
+        return
+    today = moment.date().isoformat()
+    if db.get_pref('last_morning_summary') != today:
+        await application.bot.send_message(OWNER_ID, format_morning(db.morning_data()), parse_mode='HTML')
+        db.set_pref('last_morning_summary', today)
+    prev = db.previous_month()
+    if moment.day <= 5 and db.get_pref('last_monthly_report') != prev:
+        text = month_report_text(prev)
+        try:
+            await application.bot.send_message(OWNER_ID, text, parse_mode='Markdown')
         except Exception:
-            log.exception('Falha no verificador de lembretes')
-        await asyncio.sleep(30)
+            await application.bot.send_message(OWNER_ID, text)
+        doc = build_csv(prev)
+        if doc:
+            await application.bot.send_document(OWNER_ID, doc, filename=doc.name,
+                                                caption=f'📄 Extrato automático de {prev[5:]}/{prev[:4]}')
+        db.set_pref('last_monthly_report', prev)
+
+
+POLL_SECONDS = 15
+
+
+async def send_owner(application, text):
+    """Envia em HTML; se o Telegram recusar a formatação, reenvia como texto puro."""
+    try:
+        await application.bot.send_message(OWNER_ID, text, parse_mode='HTML')
+    except Exception as exc:
+        if type(exc).__name__ != 'BadRequest':
+            raise
+        await application.bot.send_message(OWNER_ID, re.sub(r'</?[a-z]+>', '', html.unescape(text)))
+
+
+def reminder_text(reminder, now=None):
+    text = f'⏰ <b>Lembrete #{reminder["id"]}</b>\n{html.escape(reminder["content"])}'
+    late = ((now or db.now()) - datetime.fromisoformat(reminder['due_at'])).total_seconds()
+    if late > 180:
+        text += f'\n\n<i>(enviado com {int(late // 60)} min de atraso)</i>'
+    return text
+
+
+def debt_alert_text(debt):
+    days = debt['days_left']
+    title = html.escape(str(debt['title']))
+    head = ('📅 <b>Conta vencendo em 3 dias!</b>' if days == 3 else
+            '⚠️ <b>Conta vence amanhã!</b>' if days == 1 else
+            '🔴 <b>Conta vence HOJE!</b>' if days == 0 else '❗ <b>Conta em atraso!</b>')
+    due = db.short_date(debt['due_date'])
+    tail = f'🗓 Venceu em: {due} ({-days} dia{"s" if days < -1 else ""} atrás)' if days < 0 else f'🗓 Vencimento: {due}'
+    return f'{head}\n📌 {title}\n💳 Restante: {html.escape(db.brl(debt["remaining"]))}\n{tail}'
+
+
+async def send_due_reminders(application):
+    for reminder in db.due_reminders():
+        try:
+            await send_owner(application, reminder_text(reminder))
+            db.mark_reminder(reminder['id'])
+        except Exception as exc:
+            log.warning('Falha de envio do lembrete #%s: %s', reminder['id'], type(exc).__name__)
+
+
+async def send_debt_alerts(application):
+    for debt in db.get_debts_due_soon():
+        if db.was_debt_notified(debt['id'], debt['alert_type']):
+            continue
+        try:
+            await send_owner(application, debt_alert_text(debt))
+            db.mark_debt_notified(debt['id'], debt['alert_type'])
+        except Exception as exc:
+            log.warning('Falha ao enviar alerta de dívida #%s: %s', debt['id'], type(exc).__name__)
+
+
+async def reminder_worker(application):
+    """Cada etapa é isolada: um erro ou lentidão em uma não atrasa lembretes."""
+    while True:
+        if OWNER_ID:
+            for step in (send_due_reminders, send_debt_alerts, daily_jobs):
+                try:
+                    await step(application)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    log.warning('Falha na etapa %s: %s', step.__name__, type(exc).__name__)
+            try:
+                db.generate_recurring()
+            except Exception:
+                log.exception('Falha ao gerar contas fixas')
+        await asyncio.sleep(POLL_SECONDS)
 
 
 async def on_init(app):

@@ -3,7 +3,7 @@ import contextlib
 import re
 import sqlite3
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from config import DB_PATH, TZ
 
 
@@ -380,6 +380,45 @@ def mark_debt_notified(debt_id, alert_type):
     with conn() as c:
         c.execute('INSERT OR IGNORE INTO debt_notifications(debt_id, alert_type, sent_at) VALUES(?,?,?)',
                   (debt_id, alert_type, now().isoformat()))
+
+
+def get_pref(key, default=None):
+    with conn() as c:
+        row = c.execute('SELECT value FROM preferences WHERE key=?', (key,)).fetchone()
+    return row['value'] if row else default
+
+
+def set_pref(key, value):
+    with conn() as c:
+        c.execute("INSERT INTO preferences(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (key, str(value)))
+
+
+def previous_month(day=None):
+    """Mês anterior (AAAA-MM) ao dia informado (padrão: hoje)."""
+    day = day or now().date()
+    return (day.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
+
+
+def month_transactions(month):
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', month):
+        raise ValueError('Mês inválido. Use AAAA-MM.')
+    with conn() as c:
+        return [dict(r) for r in c.execute(
+            'SELECT id, kind, amount, category, description, occurred_at FROM transactions '
+            'WHERE substr(occurred_at,1,7)=? ORDER BY id', (month,))]
+
+
+def morning_data(days=7):
+    """Dados do resumo diário: saldo do mês, contas até `days` dias (e atrasadas) e lembretes de hoje."""
+    today = now().date()
+    limit = (today + timedelta(days=days)).isoformat()
+    debts = [dict(d, remaining=d['original_amount'] - d['paid_amount'],
+                  days_left=(date.fromisoformat(d['due_date']) - today).days)
+             for d in get_debts() if d['due_date'] <= limit]
+    reminders = [r for r in get_reminders()
+                 if datetime.fromisoformat(r['due_at']).astimezone(TZ).date() == today]
+    return {'summary': summary(), 'debts': debts, 'reminders': reminders}
 
 
 def ai_context():

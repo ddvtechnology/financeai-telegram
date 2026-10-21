@@ -13,6 +13,10 @@ try:
 except Exception:
     # O instalador inclui tzdata; este fallback só evita erro obscuro na configuração.
     raise RuntimeError(f'Fuso horário inválido ou base tzdata ausente: {TZ_NAME}. Instale tzdata e confira TIMEZONE no .env.') from None
+try:
+    MORNING_HOUR = min(23, max(0, int(os.getenv('MORNING_HOUR', '8'))))
+except ValueError:
+    MORNING_HOUR = 8
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 OWNER = os.getenv('TELEGRAM_OWNER_ID', '').strip()
 OWNER_ID = int(OWNER) if OWNER.isdigit() else 0
