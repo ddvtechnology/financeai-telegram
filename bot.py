@@ -847,12 +847,38 @@ async def reminder_worker(application):
         try:
             if OWNER_ID:
                 db.generate_recurring()
+                # Lembretes manuais cadastrados pelo usuário
                 for reminder in db.due_reminders():
                     try:
-                        await application.bot.send_message(OWNER_ID,f'⏰ FinanceAI — lembrete #{reminder["id"]}\n{reminder["content"]}')
+                        await application.bot.send_message(
+                            OWNER_ID,
+                            f'⏰ *Lembrete #{reminder["id"]}*\n{reminder["content"]}',
+                            parse_mode='Markdown')
                         db.mark_reminder(reminder['id'])
                     except Exception as exc:
-                        log.warning('Falha de envio do lembrete #%s: %s',reminder['id'],type(exc).__name__)
+                        log.warning('Falha de envio do lembrete #%s: %s', reminder['id'], type(exc).__name__)
+
+                # Alertas automáticos de dívidas próximas ou em atraso
+                for debt in db.get_debts_due_soon():
+                    if db.was_debt_notified(debt['id'], debt['alert_type']):
+                        continue
+                    days = debt['days_left']
+                    rem = db.brl(debt['remaining'])
+                    due_br = db.short_date(debt['due_date'])
+                    if days == 3:
+                        msg = f'📅 *Conta vencendo em 3 dias\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
+                    elif days == 1:
+                        msg = f'⚠️ *Conta vence amanhã\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
+                    elif days == 0:
+                        msg = f'🔴 *Conta vence HOJE\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n🗓 Vencimento: {due_br}'
+                    else:
+                        msg = (f'❗ *Conta em atraso\\!*\n📌 {debt["title"]}\n💳 Restante: {rem}\n'
+                               f'🗓 Venceu em: {due_br} ({abs(days)} dia{"s" if abs(days) > 1 else ""} atrás)')
+                    try:
+                        await application.bot.send_message(OWNER_ID, msg, parse_mode='MarkdownV2')
+                        db.mark_debt_notified(debt['id'], debt['alert_type'])
+                    except Exception as exc:
+                        log.warning('Falha ao enviar alerta de dívida #%s: %s', debt['id'], type(exc).__name__)
         except asyncio.CancelledError:
             raise
         except Exception:

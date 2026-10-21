@@ -83,5 +83,26 @@ class FinanceTests(unittest.TestCase):
             check=c.execute('PRAGMA integrity_check').fetchone()[0]
         self.assertEqual(check,'ok')
 
+    def test_debt_due_soon_alerts(self):
+        from datetime import timedelta
+        today = db.now().date()
+        d3 = db.add_debt(10000, (today + timedelta(days=3)).isoformat(), 'Conta 3d')
+        d0 = db.add_debt(20000, today.isoformat(), 'Conta hoje')
+        dov = db.add_debt(30000, (today - timedelta(days=2)).isoformat(), 'Conta atrasada')
+        db.add_debt(5000, (today + timedelta(days=10)).isoformat(), 'Conta futura')
+
+        due_soon = db.get_debts_due_soon()
+        alert_types = {d['title']: d['alert_type'] for d in due_soon}
+        self.assertEqual(alert_types.get('Conta 3d'), '3d')
+        self.assertEqual(alert_types.get('Conta hoje'), 'today')
+        self.assertEqual(alert_types.get('Conta atrasada'), 'overdue')
+        self.assertNotIn('Conta futura', alert_types)
+
+        db.mark_debt_notified(d3, '3d')
+        self.assertTrue(db.was_debt_notified(d3, '3d'))
+        self.assertFalse(db.was_debt_notified(d3, '1d'))
+        db.mark_debt_notified(d3, '3d')  # idempotente, não deve lançar
+        self.assertTrue(db.was_debt_notified(d3, '3d'))
+
 
 if __name__=='__main__':unittest.main()

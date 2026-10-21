@@ -119,6 +119,13 @@ def init():
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS debt_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                debt_id INTEGER NOT NULL,
+                alert_type TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                UNIQUE(debt_id, alert_type)
+            );
         ''')
 
 
@@ -334,6 +341,45 @@ def get_profile():
     with conn() as c:
         rows = c.execute("SELECT key, value FROM preferences WHERE key LIKE 'profile_%'").fetchall()
     return {r['key'][8:]: r['value'] for r in rows}
+
+
+def get_debts_due_soon():
+    """Retorna dívidas abertas com vencimento em 3d, 1d, hoje ou em atraso."""
+    today = now().date()
+    with conn() as c:
+        rows = [dict(r) for r in c.execute(
+            'SELECT * FROM debts WHERE original_amount > paid_amount ORDER BY due_date'
+        )]
+    result = []
+    for d in rows:
+        due = date.fromisoformat(d['due_date'])
+        days_left = (due - today).days
+        if days_left == 3:
+            alert_type = '3d'
+        elif days_left == 1:
+            alert_type = '1d'
+        elif days_left == 0:
+            alert_type = 'today'
+        elif days_left < 0:
+            alert_type = 'overdue'
+        else:
+            continue
+        result.append({**d, 'days_left': days_left, 'alert_type': alert_type,
+                        'remaining': d['original_amount'] - d['paid_amount']})
+    return result
+
+
+def was_debt_notified(debt_id, alert_type):
+    with conn() as c:
+        row = c.execute('SELECT id FROM debt_notifications WHERE debt_id=? AND alert_type=?',
+                        (debt_id, alert_type)).fetchone()
+    return row is not None
+
+
+def mark_debt_notified(debt_id, alert_type):
+    with conn() as c:
+        c.execute('INSERT OR IGNORE INTO debt_notifications(debt_id, alert_type, sent_at) VALUES(?,?,?)',
+                  (debt_id, alert_type, now().isoformat()))
 
 
 def ai_context():
