@@ -87,8 +87,8 @@ class FinanceTests(unittest.TestCase):
         from datetime import timedelta
         today = db.now().date()
         d3 = db.add_debt(10000, (today + timedelta(days=3)).isoformat(), 'Conta 3d')
-        d0 = db.add_debt(20000, today.isoformat(), 'Conta hoje')
-        dov = db.add_debt(30000, (today - timedelta(days=2)).isoformat(), 'Conta atrasada')
+        db.add_debt(20000, today.isoformat(), 'Conta hoje')
+        db.add_debt(30000, (today - timedelta(days=2)).isoformat(), 'Conta atrasada')
         db.add_debt(5000, (today + timedelta(days=10)).isoformat(), 'Conta futura')
 
         due_soon = db.get_debts_due_soon()
