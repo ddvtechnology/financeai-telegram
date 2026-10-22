@@ -284,9 +284,18 @@ def insert_reminder(due_iso, content):
 
 
 def due_reminders():
+    """Lembretes vencidos. Compara datas reais (não texto) para não depender do formato salvo."""
+    current = now()
     with conn() as c:
-        return [dict(r) for r in c.execute('''SELECT * FROM reminders
-          WHERE sent_at IS NULL AND due_at <= ? ORDER BY due_at LIMIT 20''',(now().isoformat(),))]
+        rows = [dict(r) for r in c.execute('SELECT * FROM reminders WHERE sent_at IS NULL ORDER BY due_at')]
+    due = []
+    for r in rows:
+        try:
+            if datetime.fromisoformat(r['due_at']) <= current:
+                due.append(r)
+        except ValueError:
+            continue
+    return due[:20]
 
 
 def mark_reminder(rid):

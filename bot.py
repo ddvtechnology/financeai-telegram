@@ -22,7 +22,8 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, MessageHandler, filters)
 import ai
 import db
-from config import BASE, DB_PATH, MORNING_HOUR, OWNER_ID, TOKEN, TZ
+import when
+from config import BASE, DB_PATH, MORNING_HOUR, OWNER_ID, TOKEN, TZ, TZ_NAME
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('financeai')
@@ -119,7 +120,7 @@ def normalized(text):
 def looks_financial(text):
     plain = normalized(text)
     return bool(
-        re.search(r'\b(gastei|gasto|despesa|comprei|paguei|pagamento|quitei|recebi|ganhei|salario|renda|receita|conta a pagar|contas a pagar|vencimento|vence|divida|dividas|saldo|relatorio|historico|planejamento|orcamento|lembrete|lembra|boleto|fatura|cartao|aluguel|supermercado|mercado|alimentacao|transporte|juros|financiamento)\b', plain)
+        re.search(r'\b(gastei|gasto|despesa|comprei|paguei|pagamento|quitei|recebi|ganhei|salario|renda|receita|conta a pagar|contas a pagar|vencimento|vence|divida|dividas|saldo|relatorio|historico|planejamento|orcamento|lembrete|lembr\w*|avis\w*|alarme|notifi\w*|boleto|fatura|cartao|aluguel|supermercado|mercado|alimentacao|transporte|juros|financiamento)\b', plain)
         or re.search(r'R\$', text, re.I)
         or re.search(r'\b\d+[,.]\d{2}\b', text)
     )
@@ -376,6 +377,22 @@ async def plan(update, context):
     if not await guard(update):return
     p=db.planning()
     await say(update,f'PLANEJAMENTO SIMPLIFICADO ({p["month"]})\nSaldo histórico registrado: {db.brl(p["balance"])}\nRecebido neste mês: {db.brl(p["income_month"])}\nGasto neste mês: {db.brl(p["spent_month"])}\nDívidas ainda a vencer neste mês: {db.brl(p["due_remaining_month"])}\nDívidas a vencer no próximo mês: {db.brl(p["due_next_month"])}\n\n⚠️ Não prevê receitas futuras nem é saldo bancário. Para aconselhamento detalhado, escreva: Analise meu planejamento e minhas dívidas.')
+
+
+async def clock_cmd(update, context):
+    if not await guard(update): return
+    n = db.now()
+    off = n.strftime('%z')
+    lines = [f'🕒 Agora no bot: {ai.WEEKDAYS[n.weekday()]}, {n.strftime("%d/%m/%Y %H:%M:%S")}',
+             f'🌎 Fuso: {TZ_NAME} (UTC{off[:3]}:{off[3:]})',
+             'Se estiver diferente do relógio do celular, ative a data e hora automáticas do Android.']
+    pending = db.get_reminders()[:5]
+    if pending:
+        lines.append('\n⏰ Próximos lembretes:')
+        for r in pending:
+            due = datetime.fromisoformat(r['due_at']).astimezone(TZ)
+            lines.append(f'• {due.strftime("%d/%m %H:%M")} — {r["content"]}')
+    await say(update, '\n'.join(lines), parse_mode=None)
 
 
 async def reminder_add(update, context):
@@ -685,30 +702,34 @@ async def prepare_natural_reminder(update, context, result, prompt, previous=Non
         await store_clarification(update, context, prompt, result,
             'Sobre o que você quer ser lembrado?', previous)
         return
-    if not reminder_at:
+    now = db.now()
+    # A data/hora escrita pelo usuário vale mais que a conta feita pela IA.
+    text = ' '.join(filter(None, [(previous or {}).get('original_message'), prompt]))
+    parsed = when.resolve(text, now)
+    if parsed is None and reminder_at:
+        try:
+            # A IA devolve hora local; qualquer fuso/offset que ela escreva é ignorado.
+            parsed = datetime.fromisoformat(str(reminder_at)).replace(tzinfo=TZ)
+        except (ValueError, TypeError):
+            await store_clarification(update, context, prompt, result,
+                'Não consegui entender a data e hora. Informe uma data e horário futuros, por favor.', previous)
+            return
+    if parsed is None:
         await store_clarification(update, context, prompt, result,
             'Em qual dia e horário devo lembrar você? Informe a data e a hora.', previous)
         return
-    try:
-        parsed = datetime.fromisoformat(str(reminder_at))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=TZ)
-        else:
-            parsed = parsed.astimezone(TZ)
-        if parsed <= db.now():
-            await store_clarification(update, context, prompt, result,
-                'Essa data e hora já passaram. Qual data e horário futuros você prefere?', previous)
-            return
-    except (ValueError, TypeError):
+    if parsed <= now:
         await store_clarification(update, context, prompt, result,
-            'Não consegui entender a data e hora. Informe uma data e horário futuros, por favor.', previous)
+            'Essa data e hora já passaram. Qual data e horário futuros você prefere?', previous)
         return
 
     due_at = parsed.isoformat()
     action = {'type': 'reminder', 'due_at': due_at, 'content': content}
     context.application.bot_data.setdefault('natural_drafts', {}).pop(user_id, None)
     await ask_action_confirmation(update, context, action,
-        f'Confira o lembrete:\n\nLembrar: {content}\nQuando: {parsed.strftime("%d/%m/%Y às %H:%M")}\n\nPosso salvar esse lembrete?')
+        f'Confira o lembrete:\n\nLembrar: {content}\n'
+        f'Quando: {ai.WEEKDAYS[parsed.weekday()]}, {parsed.strftime("%d/%m/%Y às %H:%M")} ({when.humanize(parsed - db.now())})\n\n'
+        'Posso salvar esse lembrete?')
 
 
 async def dispatch_natural_query(update, context, query):
@@ -1002,7 +1023,7 @@ def main():
     app=(ApplicationBuilder().token(TOKEN).post_init(on_init).post_stop(on_stop).build())
     routes={'id':show_id,'start':start,'ajuda':help_cmd,'receita':movement,'despesa':movement,
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
-            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'lembretes':reminder_list,
+            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'lembretes':reminder_list,
             'modelo':mode_set,'backup':backup,'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'fixa':recurring_add}
     for name, handler in routes.items():
         app.add_handler(CommandHandler(name,handler))
