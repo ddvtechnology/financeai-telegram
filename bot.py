@@ -13,7 +13,7 @@ import secrets
 import sqlite3
 import tempfile
 import unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
                       ReplyKeyboardMarkup)
@@ -23,7 +23,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
 import ai
 import db
 import when
-from config import BASE, DB_PATH, MORNING_HOUR, OWNER_ID, TOKEN, TZ, TZ_NAME
+from config import BASE, MORNING_HOUR, OWNER_ID, TOKEN, TZ, TZ_NAME
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('financeai')
@@ -464,18 +464,23 @@ async def mode_callback(update, context):
         await query.edit_message_text('Não foi possível alterar o modelo. Tente novamente.')
 
 
+def make_backup(directory):
+    """Cópia consistente do banco (API de backup do SQLite funciona mesmo com WAL)."""
+    outfile = Path(directory) / ('financeai-backup-' + db.now().strftime('%Y%m%d-%H%M%S') + '.sqlite3')
+    original = sqlite3.connect(db.DB_PATH)
+    dst = sqlite3.connect(outfile)
+    try:
+        original.backup(dst)
+    finally:
+        original.close()
+        dst.close()
+    return outfile
+
+
 async def backup(update, context):
     if not await guard(update):return
-    # backup API SQLite é consistente mesmo com transações WAL.
     with tempfile.TemporaryDirectory() as tmp:
-        outfile=Path(tmp)/('financeai-backup-'+db.now().strftime('%Y%m%d-%H%M%S')+'.sqlite3')
-        original = sqlite3.connect(DB_PATH)
-        dst = sqlite3.connect(outfile)
-        try:
-            original.backup(dst)
-        finally:
-            original.close()
-            dst.close()
+        outfile = make_backup(tmp)
         with outfile.open('rb') as f:
             await update.message.reply_document(f,filename=outfile.name,caption='Backup completo: mantenha este arquivo privado. Faça cópias fora do celular.')
 
@@ -916,19 +921,81 @@ async def daily_jobs(application):
             await application.bot.send_document(OWNER_ID, doc, filename=doc.name,
                                                 caption=f'📄 Extrato automático de {prev[5:]}/{prev[:4]}')
         db.set_pref('last_monthly_report', prev)
+    last = db.get_pref('last_auto_backup')
+    if last is None or (moment.date() - date.fromisoformat(last)).days >= 7:
+        with tempfile.TemporaryDirectory() as tmp:
+            outfile = make_backup(tmp)
+            with outfile.open('rb') as f:
+                await application.bot.send_document(
+                    OWNER_ID, f, filename=outfile.name,
+                    caption='🗄 Backup semanal automático do banco. Guarde fora do celular (Drive, e-mail).')
+        db.set_pref('last_auto_backup', today)
+
+
+async def alert_callback(update, context):
+    """Botões das mensagens automáticas: adiar lembrete, registrar pagamento, lembrar de conta."""
+    q = update.callback_query
+    if not await guard(update): return
+    await q.answer()
+    try:
+        prefix, action, num = q.data.split(':')
+        num = int(num)
+    except ValueError:
+        return
+    original = q.message.text or ''
+    now = db.now()
+    tomorrow = (now + timedelta(days=1)).replace(hour=MORNING_HOUR, minute=0, second=0, microsecond=0)
+    if prefix == 'rm':
+        due = now + timedelta(hours=1) if action == 'h1' else tomorrow
+        if db.snooze_reminder(num, due.isoformat()):
+            await q.edit_message_text(f'{original}\n\n⏰ Adiado para {due.strftime("%d/%m às %H:%M")}.')
+        else:
+            await q.edit_message_text(f'{original}\n\nLembrete não encontrado.')
+        return
+    debt = next((d for d in db.get_debts() if d['id'] == num), None)
+    if debt is None:
+        await q.edit_message_text(f'{original}\n\n✅ Essa conta já está quitada ou foi removida.')
+        return
+    if action == 'snz':
+        due = now + timedelta(hours=1)
+        db.insert_reminder(due.isoformat(), f'Pagar {debt["title"]}')
+        await q.edit_message_text(f'{original}\n\n⏰ Vou lembrar de novo às {due.strftime("%H:%M")}.')
+    elif action == 'pay':
+        remaining = debt['original_amount'] - debt['paid_amount']
+        nonce = secrets.token_hex(8)
+        context.application.bot_data.setdefault('pending_payments', {})[nonce] = (num, remaining, now.timestamp())
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton('✅ Confirmar registro', callback_data='pay:' + nonce),
+            InlineKeyboardButton('Cancelar', callback_data='cancel:' + nonce)]])
+        await q.edit_message_reply_markup(None)
+        await q.message.reply_text(
+            f'Registrar o pagamento TOTAL de {db.brl(remaining)} da conta “{debt["title"]}”?\nNão transfere dinheiro de verdade.',
+            reply_markup=keyboard)
 
 
 POLL_SECONDS = 15
 
 
-async def send_owner(application, text):
+async def send_owner(application, text, markup=None):
     """Envia em HTML; se o Telegram recusar a formatação, reenvia como texto puro."""
     try:
-        await application.bot.send_message(OWNER_ID, text, parse_mode='HTML')
+        await application.bot.send_message(OWNER_ID, text, parse_mode='HTML', reply_markup=markup)
     except Exception as exc:
         if type(exc).__name__ != 'BadRequest':
             raise
-        await application.bot.send_message(OWNER_ID, re.sub(r'</?[a-z]+>', '', html.unescape(text)))
+        await application.bot.send_message(OWNER_ID, re.sub(r'</?[a-z]+>', '', html.unescape(text)), reply_markup=markup)
+
+
+def reminder_keyboard(rid):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton('⏰ +1 hora', callback_data=f'rm:h1:{rid}'),
+        InlineKeyboardButton('📅 Amanhã', callback_data=f'rm:dy:{rid}')]])
+
+
+def debt_keyboard(debt_id):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton('✅ Já paguei', callback_data=f'da:pay:{debt_id}'),
+        InlineKeyboardButton('⏰ Lembrar em 1h', callback_data=f'da:snz:{debt_id}')]])
 
 
 def reminder_text(reminder, now=None):
@@ -953,18 +1020,20 @@ def debt_alert_text(debt):
 async def send_due_reminders(application):
     for reminder in db.due_reminders():
         try:
-            await send_owner(application, reminder_text(reminder))
+            await send_owner(application, reminder_text(reminder), reminder_keyboard(reminder['id']))
             db.mark_reminder(reminder['id'])
         except Exception as exc:
             log.warning('Falha de envio do lembrete #%s: %s', reminder['id'], type(exc).__name__)
 
 
 async def send_debt_alerts(application):
+    if db.now().hour < MORNING_HOUR:
+        return  # alertas de conta só a partir do horário do resumo matinal
     for debt in db.get_debts_due_soon():
         if db.was_debt_notified(debt['id'], debt['alert_type']):
             continue
         try:
-            await send_owner(application, debt_alert_text(debt))
+            await send_owner(application, debt_alert_text(debt), debt_keyboard(debt['id']))
             db.mark_debt_notified(debt['id'], debt['alert_type'])
         except Exception as exc:
             log.warning('Falha ao enviar alerta de dívida #%s: %s', debt['id'], type(exc).__name__)
@@ -1029,6 +1098,7 @@ def main():
         app.add_handler(CommandHandler(name,handler))
     app.add_handler(CallbackQueryHandler(payment_callback,pattern='^(pay|cancel):[a-f0-9]{16}$'))
     app.add_handler(CallbackQueryHandler(natural_action_callback,pattern='^nl:(confirm|cancel):[a-f0-9]{16}$'))
+    app.add_handler(CallbackQueryHandler(alert_callback,pattern='^(rm:(h1|dy)|da:(pay|snz)):\\d+$'))
     app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado)$'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat))
     log.info('Iniciando o bot em long polling...')

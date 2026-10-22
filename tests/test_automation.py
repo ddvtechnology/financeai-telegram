@@ -12,13 +12,15 @@ from config import TZ
 class FakeBot:
     def __init__(self, fail_html=False):
         self.sent = []
+        self.markups = []
         self.fail_html = fail_html
 
-    async def send_message(self, chat_id, text, parse_mode=None):
+    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         if self.fail_html and parse_mode == 'HTML':
             from telegram.error import BadRequest
             raise BadRequest("Can't parse entities")
         self.sent.append(('msg', text))
+        self.markups.append(reply_markup)
 
     async def send_document(self, chat_id, doc, filename=None, caption=None):
         self.sent.append(('doc', filename))
@@ -68,11 +70,11 @@ class AutomationTests(unittest.TestCase):
         with mock.patch.object(bot, 'MORNING_HOUR', 8), self.at(2026, 11, 1, 9):
             asyncio.run(bot.daily_jobs(app))
             asyncio.run(bot.daily_jobs(app))
-        docs = [n for k, n in app.bot.sent if k == 'doc']
+        docs = [n for k, n in app.bot.sent if k == 'doc' and n.startswith('relatorio')]
         self.assertEqual(docs, ['relatorio-10-2026.csv'])
         with mock.patch.object(bot, 'MORNING_HOUR', 8), self.at(2026, 11, 20, 9):
             asyncio.run(bot.daily_jobs(app))
-        self.assertEqual(len([1 for k, _ in app.bot.sent if k == 'doc']), 1)
+        self.assertEqual(len([1 for k, n in app.bot.sent if k == 'doc' and n.startswith('relatorio')]), 1)
 
     def test_no_monthly_report_without_transactions_still_marks(self):
         app = FakeApp()
@@ -106,6 +108,44 @@ class AutomationTests(unittest.TestCase):
         self.assertIn('R$ 1.234,56', text)
         self.assertIn('2 dias atrás', text)
         self.assertIn('Conta em atraso', text)
+
+
+    def test_debt_alerts_wait_for_morning_hour(self):
+        db.add_debt(10000, '2026-10-24', 'Internet')  # vence em 3 dias
+        app = FakeApp()
+        with mock.patch.object(bot, 'OWNER_ID', 1), mock.patch.object(bot, 'MORNING_HOUR', 8):
+            with self.at(2026, 10, 21, 3):
+                asyncio.run(bot.send_debt_alerts(app))
+            self.assertEqual(app.bot.sent, [])
+            with self.at(2026, 10, 21, 8, 5):
+                asyncio.run(bot.send_debt_alerts(app))
+                asyncio.run(bot.send_debt_alerts(app))
+        self.assertEqual(len(app.bot.sent), 1)
+        self.assertIn('Internet', app.bot.sent[0][1])
+        self.assertIsNotNone(app.bot.markups[0])
+
+    def test_reminder_message_has_snooze_buttons(self):
+        db.insert_reminder((db.now() - timedelta(minutes=1)).isoformat(), 'Remédio')
+        app = FakeApp()
+        with mock.patch.object(bot, 'OWNER_ID', 1):
+            asyncio.run(bot.send_due_reminders(app))
+        data = [b.callback_data for row in app.bot.markups[0].inline_keyboard for b in row]
+        self.assertEqual(data, [f'rm:h1:{1}', f'rm:dy:{1}'])
+
+    def test_weekly_backup_sent_every_seven_days(self):
+        app = FakeApp()
+        names = lambda: [n for k, n in app.bot.sent if k == 'doc' and n.startswith('financeai-backup')]
+        with mock.patch.object(bot, 'MORNING_HOUR', 8):
+            with self.at(2026, 10, 21, 9):
+                asyncio.run(bot.daily_jobs(app))
+                asyncio.run(bot.daily_jobs(app))
+            self.assertEqual(len(names()), 1)
+            with self.at(2026, 10, 27, 9):
+                asyncio.run(bot.daily_jobs(app))
+            self.assertEqual(len(names()), 1)
+            with self.at(2026, 10, 28, 9):
+                asyncio.run(bot.daily_jobs(app))
+            self.assertEqual(len(names()), 2)
 
 
 if __name__ == '__main__':

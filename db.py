@@ -298,6 +298,12 @@ def due_reminders():
     return due[:20]
 
 
+def snooze_reminder(rid, due_iso):
+    """Reagenda um lembrete (volta a ficar pendente). Retorna True se existir."""
+    with conn() as c:
+        return c.execute('UPDATE reminders SET due_at=?, sent_at=NULL WHERE id=?', (due_iso, rid)).rowcount > 0
+
+
 def mark_reminder(rid):
     with conn() as c:
         c.execute('UPDATE reminders SET sent_at=? WHERE id=? AND sent_at IS NULL',(now().isoformat(),rid))
