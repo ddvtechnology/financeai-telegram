@@ -25,24 +25,48 @@ def parse_status(text):
             'temperature': data.get('temperature')}
 
 
-async def read_status(timeout=10):
-    """Retorna o dict de parse_status, ou None se indisponível (sem Termux:API, erro ou tempo excedido)."""
+async def check(timeout=10):
+    """Lê a bateria. Retorna (info, None) ou (None, motivo) com motivo 'missing', 'timeout' ou 'invalid:<saída>'."""
     try:
         proc = await asyncio.create_subprocess_exec(
             'termux-battery-status', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             start_new_session=True)
     except (FileNotFoundError, PermissionError, OSError):
-        return None
+        return None, 'missing'
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
-        return parse_status(out.decode('utf-8', 'ignore'))
-    except (asyncio.TimeoutError, ValueError):
+    except asyncio.TimeoutError:
         try:
             os.killpg(proc.pid, signal.SIGKILL)  # mata também os processos-filhos que seguram o pipe
         except (ProcessLookupError, PermissionError):
             pass
         await proc.wait()
-        return None
+        return None, 'timeout'
+    text = out.decode('utf-8', 'ignore').strip()
+    try:
+        return parse_status(text), None
+    except ValueError:
+        return None, 'invalid:' + (text[:120] or '(vazia)')
+
+
+async def read_status(timeout=10):
+    """Retorna o dict de parse_status, ou None se indisponível."""
+    info, _ = await check(timeout)
+    return info
+
+
+def explain(reason):
+    """Mensagem de ajuda conforme o motivo da falha."""
+    if reason == 'missing':
+        return ('O comando termux-battery-status não existe. No Termux, rode:\npkg install termux-api')
+    if reason == 'timeout':
+        return ('O comando não obteve resposta em 10 s. Isso quase sempre significa que o app Termux:API '
+                'não está instalado, nunca foi aberto, veio de uma fonte diferente do Termux (F-Droid x GitHub) '
+                'ou o Android/MIUI o está bloqueando. Abra o app Termux:API uma vez, libere a inicialização '
+                'automática e deixe a bateria dele em "Sem restrições".')
+    if str(reason).startswith('invalid:'):
+        return 'O comando respondeu algo inesperado: ' + str(reason)[8:]
+    return HELP_INSTALL
 
 
 def decide(pct, charging, state, levels, full_alert=True):

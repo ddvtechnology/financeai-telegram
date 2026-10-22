@@ -148,5 +148,20 @@ class BatteryCommandTests(unittest.TestCase):
             self.assertIsNone(asyncio.run(battery.read_status(timeout=5)))
 
 
+    def test_check_reports_reason(self):
+        with self.fake_command('sleep 30'):
+            info, reason = asyncio.run(battery.check(timeout=1))
+        self.assertEqual((info, reason), (None, 'timeout'))
+        self.assertIn('Termux:API', battery.explain(reason))
+        with self.fake_command('echo "Termux:API is not installed"'):
+            info, reason = asyncio.run(battery.check(timeout=5))
+        self.assertEqual(reason, 'invalid:Termux:API is not installed')
+        self.assertIn('inesperado', battery.explain(reason))
+        with mock.patch.dict(os.environ, {'PATH': '/nonexistent'}):
+            info, reason = asyncio.run(battery.check(timeout=2))
+        self.assertEqual(reason, 'missing')
+        self.assertIn('pkg install termux-api', battery.explain(reason))
+
+
 if __name__ == '__main__':
     unittest.main()

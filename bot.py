@@ -400,9 +400,9 @@ async def clock_cmd(update, context):
 
 async def battery_cmd(update, context):
     if not await guard(update): return
-    info = await battery.read_status()
+    info, reason = await battery.check()
     if info is None:
-        await say(update, 'Não consegui ler a bateria.\n' + battery.HELP_INSTALL, parse_mode=None)
+        await say(update, 'Não consegui ler a bateria.\n\n' + battery.explain(reason), parse_mode=None)
         return
     await say(update, battery.describe(info), parse_mode=None)
 
