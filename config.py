@@ -17,6 +17,12 @@ try:
     MORNING_HOUR = min(23, max(0, int(os.getenv('MORNING_HOUR', '8'))))
 except ValueError:
     MORNING_HOUR = 8
+BATTERY_ALERTS = os.getenv('BATTERY_ALERTS', '1').strip() != '0'
+BATTERY_FULL_ALERT = os.getenv('BATTERY_FULL_ALERT', '1').strip() != '0'
+try:
+    BATTERY_LEVELS = sorted({int(x) for x in os.getenv('BATTERY_LEVELS', '20,10,5').split(',') if 0 < int(x) < 100}, reverse=True)
+except ValueError:
+    BATTERY_LEVELS = [20, 10, 5]
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 OWNER = os.getenv('TELEGRAM_OWNER_ID', '').strip()
 OWNER_ID = int(OWNER) if OWNER.isdigit() else 0

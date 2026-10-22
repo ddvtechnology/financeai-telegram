@@ -102,6 +102,8 @@ A interação diária não depende de comandos. Estes continuam disponíveis com
 - `/start` e `/ajuda` — apresentação e exemplos.
 - `/receita 1870 Salário | Mensal` e `/despesa 45,90 Alimentação | Almoço` — registros estruturados antigos.
 - `/saldo`, `/conta`, `/dividas`, `/pagar`, `/historico`, `/relatorio`, `/planejar`, `/lembrete`, `/lembretes`, `/modelo` e `/backup` — atalhos administrativos.
+- `/hora` — mostra o relógio e o fuso que o bot usa (confira se bate com o celular) e os próximos lembretes.
+- `/bateria` — mostra a porcentagem da bateria do celular (precisa do Termux:API, veja abaixo).
 
 Para manter a segurança, apenas o ID definido em `TELEGRAM_OWNER_ID` pode usar os recursos financeiros e somente em conversa privada. `/id` fica disponível antes dessa configuração.
 
@@ -117,6 +119,12 @@ tmux new -s financeai
 Para sair sem encerrar o processo, pressione `Ctrl+B`, solte e depois pressione `D`. Para retornar: `tmux attach -t financeai`.
 
 A inicialização automática com Termux:Boot é opcional e não garante funcionamento contínuo: o Android pode encerrar apps em segundo plano. Proteja o aparelho, monitore aquecimento e faça backups externos.
+
+### Alertas automáticos
+
+O bot envia sozinho: resumo matinal e alertas de conta a partir de `MORNING_HOUR` (padrão 8h), relatório do mês anterior nos primeiros dias do mês e backup semanal do banco. Lembretes e alertas têm botões para adiar ou registrar o pagamento.
+
+**Alerta de bateria:** avisa quando a bateria cai a 20%, 10% e 5% (e quando chega a 100% carregando), pois celular desligado significa bot parado e lembretes perdidos. Requer o app **Termux:API** (instalado da mesma fonte do Termux, F-Droid) e, no Termux, `pkg install termux-api`. Sem isso o alerta fica inativo, sem erro. Ajuste no `.env` com `BATTERY_LEVELS`, `BATTERY_FULL_ALERT=0` ou `BATTERY_ALERTS=0`.
 
 ## 7. Segurança e limites
 

@@ -12,6 +12,7 @@ import re
 import secrets
 import sqlite3
 import tempfile
+import time
 import unicodedata
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -21,9 +22,11 @@ from telegram.constants import ChatType
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, MessageHandler, filters)
 import ai
+import battery
 import db
 import when
-from config import BASE, MORNING_HOUR, OWNER_ID, TOKEN, TZ, TZ_NAME
+from config import (BASE, BATTERY_ALERTS, BATTERY_FULL_ALERT, BATTERY_LEVELS, MORNING_HOUR,
+                    OWNER_ID, TOKEN, TZ, TZ_NAME)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('financeai')
@@ -393,6 +396,15 @@ async def clock_cmd(update, context):
             due = datetime.fromisoformat(r['due_at']).astimezone(TZ)
             lines.append(f'• {due.strftime("%d/%m %H:%M")} — {r["content"]}')
     await say(update, '\n'.join(lines), parse_mode=None)
+
+
+async def battery_cmd(update, context):
+    if not await guard(update): return
+    info = await battery.read_status()
+    if info is None:
+        await say(update, 'Não consegui ler a bateria.\n' + battery.HELP_INSTALL, parse_mode=None)
+        return
+    await say(update, battery.describe(info), parse_mode=None)
 
 
 async def reminder_add(update, context):
@@ -883,6 +895,8 @@ def format_morning(data):
              f'💰 Saldo registrado: <code>{html.escape(db.brl(s["total"]))}</code>',
              f'🟢 Receitas do mês: <code>{html.escape(db.brl(s["receita"]))}</code>',
              f'🔴 Despesas do mês: <code>{html.escape(db.brl(s["despesa"]))}</code>\n']
+    if data.get('battery'):
+        lines.insert(4, f'🔋 Bateria do celular: {data["battery"]["pct"]}%\n')
     if data['debts']:
         lines.append('📅 <b>Contas (atrasadas e próximos 7 dias):</b>')
         for d in data['debts']:
@@ -907,7 +921,9 @@ async def daily_jobs(application):
         return
     today = moment.date().isoformat()
     if db.get_pref('last_morning_summary') != today:
-        await application.bot.send_message(OWNER_ID, format_morning(db.morning_data()), parse_mode='HTML')
+        data = db.morning_data()
+        data['battery'] = await battery.read_status() if BATTERY_ALERTS else None
+        await application.bot.send_message(OWNER_ID, format_morning(data), parse_mode='HTML')
         db.set_pref('last_morning_summary', today)
     prev = db.previous_month()
     if moment.day <= 5 and db.get_pref('last_monthly_report') != prev:
@@ -974,6 +990,28 @@ async def alert_callback(update, context):
 
 
 POLL_SECONDS = 15
+BATTERY_CHECK_SECONDS = 300
+_battery_next = 0.0
+_battery_warned = False
+
+
+async def battery_job(application):
+    """Avisa quando a bateria cai de 20/10/5% (e quando chega a 100% carregando)."""
+    global _battery_next, _battery_warned
+    if not BATTERY_ALERTS or time.monotonic() < _battery_next:
+        return
+    _battery_next = time.monotonic() + BATTERY_CHECK_SECONDS
+    info = await battery.read_status()
+    if info is None:
+        if not _battery_warned:
+            log.info('Bateria indisponível (Termux:API ausente?). Alertas de bateria inativos.')
+            _battery_warned = True
+        return
+    message, state = battery.decide(info['pct'], info['charging'], db.get_pref('battery_state', ''),
+                                    BATTERY_LEVELS, BATTERY_FULL_ALERT)
+    if message:
+        await send_owner(application, message)
+    db.set_pref('battery_state', state)
 
 
 async def send_owner(application, text, markup=None):
@@ -1043,7 +1081,7 @@ async def reminder_worker(application):
     """Cada etapa é isolada: um erro ou lentidão em uma não atrasa lembretes."""
     while True:
         if OWNER_ID:
-            for step in (send_due_reminders, send_debt_alerts, daily_jobs):
+            for step in (send_due_reminders, send_debt_alerts, battery_job, daily_jobs):
                 try:
                     await step(application)
                 except asyncio.CancelledError:
@@ -1092,7 +1130,7 @@ def main():
     app=(ApplicationBuilder().token(TOKEN).post_init(on_init).post_stop(on_stop).build())
     routes={'id':show_id,'start':start,'ajuda':help_cmd,'receita':movement,'despesa':movement,
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
-            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'lembretes':reminder_list,
+            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,'lembretes':reminder_list,
             'modelo':mode_set,'backup':backup,'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'fixa':recurring_add}
     for name, handler in routes.items():
         app.add_handler(CommandHandler(name,handler))
