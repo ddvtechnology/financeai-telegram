@@ -163,5 +163,18 @@ class BatteryCommandTests(unittest.TestCase):
         self.assertIn('pkg install termux-api', battery.explain(reason))
 
 
+
+class BatteryQuestionTests(unittest.TestCase):
+    def test_routes_short_battery_questions(self):
+        for text in ('bateria', 'qual a bateria?', 'quanto tenho de bateria', 'Nível da bateria do celular', 'como está a bateria'):
+            self.assertTrue(bot.asks_battery(text), text)
+
+    def test_does_not_hijack_financial_or_long_messages(self):
+        for text in ('gastei 50 reais com bateria nova', 'comprei uma bateria R$ 120,00',
+                     'me lembra de trocar a bateria do carro amanhã às 9 e também de pagar a conta',
+                     'qual meu saldo'):
+            self.assertFalse(bot.asks_battery(text), text)
+
+
 if __name__ == '__main__':
     unittest.main()

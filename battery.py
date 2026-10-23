@@ -25,12 +25,22 @@ def parse_status(text):
             'temperature': data.get('temperature')}
 
 
+def _env():
+    """Garante que os binários do Termux estejam no PATH (ex.: bot iniciado por Termux:Boot ou tmux)."""
+    env = dict(os.environ)
+    prefix = env.get('PREFIX') or '/data/data/com.termux/files/usr'
+    bin_dir = os.path.join(prefix, 'bin')
+    if os.path.isdir(bin_dir) and bin_dir not in env.get('PATH', '').split(os.pathsep):
+        env['PATH'] = bin_dir + os.pathsep + env.get('PATH', '')
+    return env
+
+
 async def check(timeout=10):
     """Lê a bateria. Retorna (info, None) ou (None, motivo) com motivo 'missing', 'timeout' ou 'invalid:<saída>'."""
     try:
         proc = await asyncio.create_subprocess_exec(
             'termux-battery-status', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True)
+            start_new_session=True, env=_env())
     except (FileNotFoundError, PermissionError, OSError):
         return None, 'missing'
     try:

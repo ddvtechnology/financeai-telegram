@@ -120,6 +120,12 @@ def normalized(text):
     return re.sub(r'[^a-z0-9]+', ' ', text.lower()).strip()
 
 
+def asks_battery(text):
+    """Pergunta curta sobre a bateria do celular (ex.: 'qual a bateria?'), sem cara de gasto."""
+    words = normalized(text).split()
+    return 'bateria' in words and len(words) <= 6 and not looks_financial(text)
+
+
 def looks_financial(text):
     plain = normalized(text)
     return bool(
@@ -400,8 +406,9 @@ async def clock_cmd(update, context):
 
 async def battery_cmd(update, context):
     if not await guard(update): return
-    info, reason = await battery.check()
+    info, reason = await battery.check(timeout=20)  # a 1ª chamada pode demorar para acordar o app
     if info is None:
+        log.info('Leitura de bateria falhou: %s', reason)
         await say(update, 'Não consegui ler a bateria.\n\n' + battery.explain(reason), parse_mode=None)
         return
     await say(update, battery.describe(info), parse_mode=None)
@@ -519,6 +526,9 @@ async def chat(update, context):
         await report(update, context); return
     if shortcut == normalized('⚙️ Modelo de IA'):
         await mode_set(update, context); return
+
+    if asks_battery(prompt):
+        await battery_cmd(update, context); return
 
     user_id = update.effective_user.id
     drafts = context.application.bot_data.setdefault('natural_drafts', {})
