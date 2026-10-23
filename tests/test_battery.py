@@ -163,6 +163,21 @@ class BatteryCommandTests(unittest.TestCase):
         self.assertIn('pkg install termux-api', battery.explain(reason))
 
 
+    def test_command_that_reads_stdin_does_not_hang_when_parent_stdin_is_open(self):
+        """termux-api espera o fim da entrada; o bot deve fechá-la (stdin=DEVNULL)."""
+        import subprocess
+        import sys
+        code = 'import asyncio, battery; print(asyncio.run(battery.check(timeout=4)))'
+        with self.fake_command('cat >/dev/null; echo \'{"percentage": 61, "plugged": "UNPLUGGED"}\''):
+            with subprocess.Popen([sys.executable, '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  cwd=str(Path(__file__).resolve().parents[1]), text=True) as proc:
+                try:
+                    proc.wait(timeout=15)  # o stdin do pai permanece aberto durante a espera
+                    out = proc.stdout.read()
+                finally:
+                    proc.stdin.close()
+        self.assertIn("'pct': 61", out)
+
 
 class BatteryQuestionTests(unittest.TestCase):
     def test_routes_short_battery_questions(self):

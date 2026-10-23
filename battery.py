@@ -39,8 +39,8 @@ async def check(timeout=10):
     """Lê a bateria. Retorna (info, None) ou (None, motivo) com motivo 'missing', 'timeout' ou 'invalid:<saída>'."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            'termux-battery-status', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, env=_env())
+            'termux-battery-status', stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, env=_env())
     except (FileNotFoundError, PermissionError, OSError):
         return None, 'missing'
     try:

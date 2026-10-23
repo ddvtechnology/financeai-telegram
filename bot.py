@@ -406,6 +406,7 @@ async def clock_cmd(update, context):
 
 async def battery_cmd(update, context):
     if not await guard(update): return
+    await update.message.reply_text('🔋 Lendo a bateria...')
     info, reason = await battery.check(timeout=20)  # a 1ª chamada pode demorar para acordar o app
     if info is None:
         log.info('Leitura de bateria falhou: %s', reason)
