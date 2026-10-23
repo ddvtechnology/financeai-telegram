@@ -29,6 +29,9 @@ from config import (BASE, BATTERY_ALERTS, BATTERY_FULL_ALERT, BATTERY_LEVELS, MO
                     OWNER_ID, TOKEN, TZ, TZ_NAME)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+# httpx registra a URL completa das requisições, que contém o token do bot: mantém só avisos/erros.
+for _noisy in ('httpx', 'httpcore'):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger('financeai')
 LOCK = None
 
