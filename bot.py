@@ -410,7 +410,7 @@ async def clock_cmd(update, context):
 async def battery_cmd(update, context):
     if not await guard(update): return
     await update.message.reply_text('🔋 Lendo a bateria...')
-    info, reason = await battery.check(timeout=20)  # a 1ª chamada pode demorar para acordar o app
+    info, reason = await battery.check()  # a 1ª chamada pode demorar para acordar o app
     if info is None:
         log.info('Leitura de bateria falhou: %s', reason)
         await say(update, 'Não consegui ler a bateria.\n\n' + battery.explain(reason), parse_mode=None)
@@ -508,6 +508,41 @@ async def backup(update, context):
             await update.message.reply_document(f,filename=outfile.name,caption='Backup completo: mantenha este arquivo privado. Faça cópias fora do celular.')
 
 
+TYPING_INTERVAL = 4
+SLOW_NOTICE_AFTER = 25
+
+
+class Waiting:
+    """Mantém o 'digitando...' ativo e avisa uma vez quando a IA está demorando."""
+
+    def __init__(self, update):
+        self.update = update
+        self.task = None
+
+    def start(self):
+        self.task = asyncio.create_task(self._run())
+
+    async def _run(self):
+        started = time.monotonic()
+        warned = False
+        while True:
+            try:
+                await self.update.message.chat.send_action('typing')
+                if not warned and time.monotonic() - started >= SLOW_NOTICE_AFTER:
+                    warned = True
+                    await self.update.message.reply_text('⏳ A IA gratuita está demorando. Continuo aguardando a resposta...')
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(TYPING_INTERVAL)
+
+    async def stop(self):
+        if self.task:
+            self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)
+
+
 async def chat(update, context):
     if not await guard(update): return
     prompt = (update.message.text or '').strip()
@@ -546,7 +581,8 @@ async def chat(update, context):
         await say(update, 'Tudo bem, cancelei a operação pendente. Nenhum registro foi feito.')
         return
 
-    await update.message.chat.send_action('typing')
+    waiter = Waiting(update)
+    waiter.start()
     try:
         # Perguntas gerais vão direto ao chat. Mensagens sobre dinheiro passam pelo interpretador.
         if not previous and not looks_financial(prompt):
@@ -592,6 +628,8 @@ async def chat(update, context):
     except Exception:
         log.exception('Erro inesperado sem registrar a mensagem')
         await say(update, 'Ocorreu um erro inesperado. Nenhum lançamento foi feito. Tente novamente ou verifique o log do Termux.')
+    finally:
+        await waiter.stop()
 
 
 async def prepare_natural_transaction(update, context, result, prompt, previous=None):
@@ -1152,7 +1190,8 @@ def main():
     app.add_handler(CallbackQueryHandler(natural_action_callback,pattern='^nl:(confirm|cancel):[a-f0-9]{16}$'))
     app.add_handler(CallbackQueryHandler(alert_callback,pattern='^(rm:(h1|dy)|da:(pay|snz)):\\d+$'))
     app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado)$'))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat))
+    # block=False: enquanto a IA pensa, botões e comandos continuam funcionando
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat,block=False))
     log.info('Iniciando o bot em long polling...')
     app.run_polling(drop_pending_updates=False)
 

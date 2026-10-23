@@ -23,6 +23,10 @@ try:
     BATTERY_LEVELS = sorted({int(x) for x in os.getenv('BATTERY_LEVELS', '20,10,5').split(',') if 0 < int(x) < 100}, reverse=True)
 except ValueError:
     BATTERY_LEVELS = [20, 10, 5]
+try:
+    AI_TIMEOUT = max(30, int(os.getenv('AI_TIMEOUT', '180')))  # segundos de espera por resposta da IA (modelos gratuitos são lentos)
+except ValueError:
+    AI_TIMEOUT = 180
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
 OWNER = os.getenv('TELEGRAM_OWNER_ID', '').strip()
 OWNER_ID = int(OWNER) if OWNER.isdigit() else 0

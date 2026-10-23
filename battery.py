@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import signal
+import weakref
 
 log = logging.getLogger('financeai')
 HELP_INSTALL = ('Para ler a bateria é preciso: 1) instalar o app Termux:API (mesma fonte do Termux, F-Droid); '
@@ -35,7 +36,23 @@ def _env():
     return env
 
 
-async def check(timeout=10):
+_LOCKS = weakref.WeakKeyDictionary()
+
+
+def _lock():
+    """Um lock por event loop: o app Termux:API não responde bem a duas leituras simultâneas."""
+    loop = asyncio.get_running_loop()
+    if loop not in _LOCKS:
+        _LOCKS[loop] = asyncio.Lock()
+    return _LOCKS[loop]
+
+
+async def check(timeout=30):
+    async with _lock():
+        return await _check(timeout)
+
+
+async def _check(timeout):
     """Lê a bateria. Retorna (info, None) ou (None, motivo) com motivo 'missing', 'timeout' ou 'invalid:<saída>'."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -59,7 +76,7 @@ async def check(timeout=10):
         return None, 'invalid:' + (text[:120] or '(vazia)')
 
 
-async def read_status(timeout=10):
+async def read_status(timeout=30):
     """Retorna o dict de parse_status, ou None se indisponível."""
     info, _ = await check(timeout)
     return info
@@ -70,7 +87,7 @@ def explain(reason):
     if reason == 'missing':
         return ('O comando termux-battery-status não existe. No Termux, rode:\npkg install termux-api')
     if reason == 'timeout':
-        return ('O comando não obteve resposta em 10 s. Isso quase sempre significa que o app Termux:API '
+        return ('O comando não obteve resposta a tempo. Isso quase sempre significa que o app Termux:API '
                 'não está instalado, nunca foi aberto, veio de uma fonte diferente do Termux (F-Droid x GitHub) '
                 'ou o Android/MIUI o está bloqueando. Abra o app Termux:API uma vez, libere a inicialização '
                 'automática e deixe a bateria dele em "Sem restrições".')

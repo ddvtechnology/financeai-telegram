@@ -6,7 +6,7 @@ import unicodedata
 import time
 import urllib.error
 import urllib.request
-from config import MODELS, NVIDIA_URL, TZ_NAME
+from config import AI_TIMEOUT, MODELS, NVIDIA_URL, TZ_NAME
 from db import ai_context, get_mode, get_debts, last_messages, remember, now
 
 SYSTEM = '''Você é o FinanceAI, assistente pessoal de finanças prático, ágil e direto no Telegram.
@@ -127,6 +127,11 @@ def clock_answer(prompt):
     return f'📅 Hoje é {WEEKDAYS[n.weekday()]}, {n:%d/%m/%Y}, e agora são {n:%H:%M}.'
 
 
+class _Text(str):
+    """Texto do modelo; `truncated` indica que parou por limite de tamanho (finish_reason=length)."""
+    truncated = False
+
+
 def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
     if not api_key:
         raise RuntimeError('Chave NVIDIA não configurada para este modelo.')
@@ -139,7 +144,7 @@ def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
     data = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(request, timeout=100) as response:
+            with urllib.request.urlopen(request, timeout=AI_TIMEOUT) as response:
                 data = json.load(response)
             break
         except urllib.error.HTTPError as exc:
@@ -151,8 +156,8 @@ def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
             if exc.code == 429: raise RuntimeError('Limite de requisições NVIDIA atingido (429).') from None
             raise RuntimeError(f'API NVIDIA indisponível: HTTP {exc.code}.') from None
         except (urllib.error.URLError, TimeoutError) as exc:
-            if attempt < 2:
-                time.sleep(2 ** attempt)
+            if attempt < 1:  # cada tentativa já espera AI_TIMEOUT; uma repetição basta
+                time.sleep(2)
                 continue
             raise RuntimeError('Falha de conexão ou tempo excedido na NVIDIA.') from exc
     try:
@@ -161,7 +166,9 @@ def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
             answer = '\n'.join(p.get('text', '') for p in answer if isinstance(p, dict))
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError('empty answer')
-        return answer.strip()
+        result = _Text(answer.strip())
+        result.truncated = data['choices'][0].get('finish_reason') == 'length'
+        return result
     except (ValueError, TypeError, KeyError, IndexError) as exc:
         raise RuntimeError('O modelo não retornou texto utilizável; tente novamente.') from exc
 
@@ -247,10 +254,17 @@ async def interpret_message(prompt, pending=None):
         {'role':'user','content':json.dumps(payload, ensure_ascii=False)},
     ]
     # Extração de JSON não necessita de um modelo 550B; usamos sempre o modelo rápido.
-    response, used, extra = await asyncio.to_thread(
-        _request_with_fallback, prompt, messages, 350, 0.1, force_model='rapido'
-    )
-    result = _extract_json(response)
+    # 1ª tentativa com folga; se o JSON vier cortado/inválido, repete com o dobro de espaço.
+    for budget in (700, 1400):
+        response, used, extra = await asyncio.to_thread(
+            _request_with_fallback, prompt, messages, budget, 0.1, force_model='rapido'
+        )
+        try:
+            result = _extract_json(response)
+            break
+        except RuntimeError:
+            if budget == 1400:
+                raise
     result['_model'] = used
     result['_fallback_note'] = extra
     return result
@@ -270,8 +284,9 @@ async def answer(prompt):
         })
     messages += last_messages(6) + [{'role':'user','content':prompt[:3000]}]
     response, used, extra = await asyncio.to_thread(
-        _request_with_fallback, prompt, messages, 400, 0.3
+        _request_with_fallback, prompt, messages, 1500, 0.3
     )
     remember('user', prompt)
     remember('assistant', response)
-    return f'{response}{extra}'
+    note = '\n\n[Resposta cortada por limite de tamanho. Escreva “continue” para ver o resto.]' if getattr(response, 'truncated', False) else ''
+    return f'{response}{note}{extra}'
