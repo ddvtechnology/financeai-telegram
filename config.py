@@ -2,7 +2,20 @@
 import os
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(dotenv_path=None):
+        p = Path(dotenv_path) if dotenv_path else Path('.env')
+        if not p.is_file():
+            return False
+        for line in p.read_text(encoding='utf-8').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, v = line.split('=', 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('\'"'))
+        return True
 
 BASE = Path(__file__).resolve().parent
 load_dotenv(BASE / '.env')
