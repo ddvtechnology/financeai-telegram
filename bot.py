@@ -19,6 +19,7 @@ from pathlib import Path
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
                       ReplyKeyboardMarkup)
 from telegram.constants import ChatType
+from telegram.error import NetworkError
 from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
                           CommandHandler, MessageHandler, filters)
 import ai
@@ -58,6 +59,23 @@ def allowed(update):
     return (update.effective_chat is not None and update.effective_chat.type == ChatType.PRIVATE
             and update.effective_user is not None and OWNER_ID > 0
             and update.effective_user.id == OWNER_ID)
+
+
+async def safe_answer(query):
+    """Confirma o toque no botão. Se a rede falhar aqui, a ação do botão ainda deve ser executada."""
+    try:
+        await query.answer()
+    except NetworkError as exc:
+        log.warning('Não consegui confirmar o toque no botão (rede): %s', exc)
+
+
+async def on_error(update, context):
+    """Falha de rede é rotina em celular: um aviso curto. Outros erros mantêm o traceback."""
+    err = context.error
+    if isinstance(err, NetworkError):  # inclui TimedOut
+        log.warning('Falha de rede com o Telegram: %s', str(err)[:150])
+        return
+    log.error('Erro não tratado', exc_info=err)
 
 
 async def guard(update):
@@ -343,7 +361,7 @@ async def pay(update, context):
 async def payment_callback(update, context):
     q=update.callback_query
     if not await guard(update):return
-    await q.answer()
+    await safe_answer(q)
     action,nonce=q.data.split(':',1)
     pending=context.application.bot_data.setdefault('pending_payments',{})
     entry=pending.pop(nonce,None)
@@ -473,7 +491,7 @@ async def mode_set(update, context):
 async def mode_callback(update, context):
     query = update.callback_query
     if not await guard(update): return
-    await query.answer()
+    await safe_answer(query)
     try:
         _, mode = query.data.split(':', 1)
         db.set_mode(mode)
@@ -623,7 +641,7 @@ async def chat(update, context):
         result_text = await ai.answer(prompt)
         await say(update, result_text)
     except RuntimeError as exc:
-        log.warning('Falha na IA: %s', type(exc).__name__)
+        log.warning('Falha na IA: %s', exc)
         await say(update, 'Não consegui interpretar sua mensagem pela NVIDIA: ' + str(exc))
     except Exception:
         log.exception('Erro inesperado sem registrar a mensagem')
@@ -844,7 +862,7 @@ async def natural_action_callback(update, context):
     query = update.callback_query
     if not await guard(update):
         return
-    await query.answer()
+    await safe_answer(query)
     try:
         prefix, decision, nonce = query.data.split(':', 2)
     except (AttributeError, ValueError):
@@ -1004,7 +1022,7 @@ async def alert_callback(update, context):
     """Botões das mensagens automáticas: adiar lembrete, registrar pagamento, lembrar de conta."""
     q = update.callback_query
     if not await guard(update): return
-    await q.answer()
+    await safe_answer(q)
     try:
         prefix, action, num = q.data.split(':')
         num = int(num)
@@ -1179,7 +1197,10 @@ def main():
         except (ImportError, OSError):
             pass
     db.init()
-    app=(ApplicationBuilder().token(TOKEN).post_init(on_init).post_stop(on_stop).build())
+    app=(ApplicationBuilder().token(TOKEN).post_init(on_init).post_stop(on_stop)
+         .connect_timeout(20).read_timeout(30).write_timeout(30).pool_timeout(30)
+         .get_updates_connect_timeout(20).get_updates_read_timeout(40).build())
+    app.add_error_handler(on_error)
     routes={'id':show_id,'start':start,'ajuda':help_cmd,'receita':movement,'despesa':movement,
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
             'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,'lembretes':reminder_list,
