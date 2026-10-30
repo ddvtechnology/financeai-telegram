@@ -325,7 +325,7 @@ def get_reminders():
 
 
 def set_mode(mode):
-    if mode not in ('auto','rapido','avancado'): raise ValueError('Modo inválido')
+    if mode not in ('auto','rapido','avancado','gemini'): raise ValueError('Modo inválido')
     with conn() as c:
         c.execute("INSERT INTO preferences(key,value) VALUES('model_mode',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(mode,))
 

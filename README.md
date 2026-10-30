@@ -39,6 +39,7 @@ Se um token vazar, use `/revoke` no BotFather e substitua-o no `.env`.
 
 1. Acesse [NVIDIA Build](https://build.nvidia.com/models), autentique-se e gere uma chave com acesso aos modelos configurados.
 2. Coloque a chave em `NVIDIA_KEY_LIGHTNING` e `NVIDIA_KEY_ULTRA`. Uma chave pode ser usada nas duas entradas se tiver acesso a ambos os modelos.
+   Opcional: `GEMINI_API_KEY` (https://aistudio.google.com/apikey) habilita a opção **✨ Gemini** em ⚙️ Modelo de IA. No plano gratuito o Google pode usar o conteúdo enviado; para dados financeiros reais prefira chave com faturamento.
 3. Modelos: `nvidia/nemotron-3.5-lightning-30b-a3b` e `nvidia/nemotron-3-ultra-550b-a55b`.
 
 As chamadas de interpretação e as perguntas livres enviam a mensagem ao serviço NVIDIA. Para perguntas financeiras, o bot também pode enviar um resumo das movimentações e contas cadastradas. Revise os termos de privacidade e não envie senhas, tokens, números completos de cartão ou outras credenciais.
@@ -82,6 +83,8 @@ TELEGRAM_BOT_TOKEN=SEU_TOKEN_DO_BOTFATHER
 TELEGRAM_OWNER_ID=SEU_ID_NUMERICO
 NVIDIA_KEY_LIGHTNING=SUA_CHAVE_NVIDIA
 NVIDIA_KEY_ULTRA=SUA_CHAVE_NVIDIA
+GEMINI_API_KEY=SUA_CHAVE_GEMINI   # opcional
+GEMINI_MODEL=gemini-flash-latest  # opcional
 TIMEZONE=America/Recife
 ```
 

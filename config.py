@@ -34,4 +34,8 @@ NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions'
 MODELS = {
     'rapido': ('nvidia/nemotron-3.5-lightning-30b-a3b', os.getenv('NVIDIA_KEY_LIGHTNING', '').strip()),
     'avancado': ('nvidia/nemotron-3-ultra-550b-a55b', os.getenv('NVIDIA_KEY_ULTRA', '').strip()),
+    # Gemini (Google AI Studio). O nome do modelo é configurável: GEMINI_MODEL no .env.
+    'gemini': (os.getenv('GEMINI_MODEL', 'gemini-flash-latest').strip() or 'gemini-flash-latest',
+               os.getenv('GEMINI_API_KEY', '').strip()),
 }
+GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent'

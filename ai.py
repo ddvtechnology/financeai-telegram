@@ -6,7 +6,7 @@ import unicodedata
 import time
 import urllib.error
 import urllib.request
-from config import AI_TIMEOUT, MODELS, NVIDIA_URL, TZ_NAME
+from config import AI_TIMEOUT, GEMINI_URL, MODELS, NVIDIA_URL, TZ_NAME
 from db import ai_context, get_mode, get_debts, last_messages, remember, now
 
 SYSTEM = '''Você é o FinanceAI, assistente pessoal de finanças prático, ágil e direto no Telegram.
@@ -99,6 +99,7 @@ COMPLEX = re.compile(r'\b(an[aá]lis\w*|planej\w*|invest\w*|juros|cet|taxa|amort
 def choose_model(prompt, mode):
     if mode == 'rapido': return 'rapido'
     if mode == 'avancado': return 'avancado'
+    if mode == 'gemini': return 'gemini'
     return 'avancado' if COMPLEX.search(prompt) else 'rapido'
 
 
@@ -135,6 +136,39 @@ class _Text(str):
     truncated = False
 
 
+def _post_json(request, provider):
+    """POST com as regras de repetição/erros para qualquer provedor; devolve o JSON da resposta."""
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=AI_TIMEOUT) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401: raise RuntimeError(f'Chave {provider} inválida ou expirada (401).') from None
+            if exc.code == 403: raise RuntimeError(f'Acesso {provider} não autorizado para o modelo (403).') from None
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(2 ** attempt)  # 1s, 2s (roda em thread via asyncio.to_thread)
+                continue
+            if exc.code == 429: raise RuntimeError(f'Limite de requisições {provider} atingido (429).') from None
+            raise RuntimeError(f'API {provider} indisponível: HTTP {exc.code}.') from None
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < 1:  # cada tentativa já espera AI_TIMEOUT; uma repetição basta
+                time.sleep(2)
+                continue
+            raise RuntimeError(f'Falha de conexão ou tempo excedido na {provider}.') from exc
+
+
+def _text_result(extract):
+    try:
+        answer, truncated = extract()
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError('empty answer')
+        result = _Text(answer.strip())
+        result.truncated = truncated
+        return result
+    except (ValueError, TypeError, KeyError, IndexError) as exc:
+        raise RuntimeError('O modelo não retornou texto utilizável; tente novamente.') from exc
+
+
 def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
     if not api_key:
         raise RuntimeError('Chave NVIDIA não configurada para este modelo.')
@@ -144,36 +178,40 @@ def _http_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
     request = urllib.request.Request(NVIDIA_URL, data=json.dumps(body).encode('utf-8'),
         headers={'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json', 'Accept':'application/json'},
         method='POST')
-    data = None
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(request, timeout=AI_TIMEOUT) as response:
-                data = json.load(response)
-            break
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401: raise RuntimeError('Chave NVIDIA inválida ou expirada (401).') from None
-            if exc.code == 403: raise RuntimeError('Acesso NVIDIA não autorizado para o modelo (403).') from None
-            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(2 ** attempt)  # 1s, 2s (roda em thread via asyncio.to_thread)
-                continue
-            if exc.code == 429: raise RuntimeError('Limite de requisições NVIDIA atingido (429).') from None
-            raise RuntimeError(f'API NVIDIA indisponível: HTTP {exc.code}.') from None
-        except (urllib.error.URLError, TimeoutError) as exc:
-            if attempt < 1:  # cada tentativa já espera AI_TIMEOUT; uma repetição basta
-                time.sleep(2)
-                continue
-            raise RuntimeError('Falha de conexão ou tempo excedido na NVIDIA.') from exc
-    try:
+    data = _post_json(request, 'NVIDIA')
+
+    def extract():
         answer = data['choices'][0]['message']['content']
         if isinstance(answer, list):
             answer = '\n'.join(p.get('text', '') for p in answer if isinstance(p, dict))
-        if not isinstance(answer, str) or not answer.strip():
-            raise ValueError('empty answer')
-        result = _Text(answer.strip())
-        result.truncated = data['choices'][0].get('finish_reason') == 'length'
-        return result
-    except (ValueError, TypeError, KeyError, IndexError) as exc:
-        raise RuntimeError('O modelo não retornou texto utilizável; tente novamente.') from exc
+        return answer, data['choices'][0].get('finish_reason') == 'length'
+    return _text_result(extract)
+
+
+def _gemini_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4):
+    """Chamada ao Gemini (Google AI Studio) pela API REST, com a chave no cabeçalho (nunca na URL)."""
+    if not api_key:
+        raise RuntimeError('Chave Gemini não configurada (GEMINI_API_KEY no .env).')
+    system = '\n\n'.join(m['content'] for m in messages if m['role'] == 'system')
+    contents = [{'role': 'model' if m['role'] == 'assistant' else 'user', 'parts': [{'text': m['content']}]}
+                for m in messages if m['role'] != 'system']
+    body = {'contents': contents,
+            # folga extra: modelos com "raciocínio" gastam parte do limite pensando
+            'generationConfig': {'temperature': temperature, 'topP': 0.95, 'maxOutputTokens': max_tokens + 1024}}
+    if system:
+        body['systemInstruction'] = {'parts': [{'text': system}]}
+    request = urllib.request.Request(GEMINI_URL.format(model=model_name), data=json.dumps(body).encode('utf-8'),
+        headers={'x-goog-api-key': api_key, 'Content-Type': 'application/json'}, method='POST')
+    data = _post_json(request, 'Gemini')
+
+    def extract():
+        cand = data['candidates'][0]
+        text = ''.join(p.get('text', '') for p in cand['content']['parts'] if isinstance(p, dict))
+        return text, cand.get('finishReason') == 'MAX_TOKENS'
+    return _text_result(extract)
+
+
+_CALLERS = {'gemini': _gemini_call}
 
 
 def _request_with_fallback(prompt, messages, max_tokens, temperature, force_model=None):
@@ -181,7 +219,7 @@ def _request_with_fallback(prompt, messages, max_tokens, temperature, force_mode
     primary = force_model or choose_model(prompt, mode)
     model, api_key = MODELS[primary]
     try:
-        return _http_call(model, api_key, messages, max_tokens, temperature), primary, ''
+        return _CALLERS.get(primary, _http_call)(model, api_key, messages, max_tokens, temperature), primary, ''
     except RuntimeError as err:
         secondary = 'rapido' if primary == 'avancado' else 'avancado'
         if (mode != 'auto' and not force_model) or not MODELS[secondary][1] or '401' in str(err) or '403' in str(err):
@@ -260,7 +298,8 @@ async def interpret_message(prompt, pending=None):
     # 1ª tentativa com folga; se o JSON vier cortado/inválido, repete com o dobro de espaço.
     for budget in (700, 1400):
         response, used, extra = await asyncio.to_thread(
-            _request_with_fallback, prompt, messages, budget, 0.1, force_model='rapido'
+            _request_with_fallback, prompt, messages, budget, 0.1,
+            force_model='gemini' if get_mode() == 'gemini' else 'rapido'
         )
         try:
             result = _extract_json(response)

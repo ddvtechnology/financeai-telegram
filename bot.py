@@ -28,7 +28,7 @@ import db
 import quick
 import when
 from config import (BASE, BATTERY_ALERTS, BATTERY_FULL_ALERT, BATTERY_LEVELS, MORNING_HOUR,
-                    OWNER_ID, TOKEN, TZ, TZ_NAME)
+                    MODELS, OWNER_ID, TOKEN, TZ, TZ_NAME)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 # httpx registra a URL completa das requisições, que contém o token do bot: mantém só avisos/erros.
@@ -479,10 +479,12 @@ def mode_keyboard():
     auto_icon = '🔘 ' if current == 'auto' else ''
     rapido_icon = '🔘 ' if current == 'rapido' else ''
     avancado_icon = '🔘 ' if current == 'avancado' else ''
+    gemini_icon = '🔘 ' if current == 'gemini' else ''
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f'{auto_icon}⚡ Automático (Recomendado)', callback_data='mode:auto')],
         [InlineKeyboardButton(f'{rapido_icon}🚀 Rápido (Lightning - 30B)', callback_data='mode:rapido')],
         [InlineKeyboardButton(f'{avancado_icon}🧠 Avançado (Ultra - 550B)', callback_data='mode:avancado')],
+        [InlineKeyboardButton(f'{gemini_icon}✨ Gemini (Google)', callback_data='mode:gemini')],
     ])
 
 
@@ -500,6 +502,9 @@ async def mode_set(update, context):
         return
     try:
         mode = context.args[0].lower()
+        if mode == 'gemini' and not MODELS['gemini'][1]:
+            await say(update, 'Gemini ainda não está configurado: coloque GEMINI_API_KEY no .env e reinicie o bot.')
+            return
         db.set_mode(mode)
         await say(update, f'✅ Modelo configurado para: {mode}.')
     except ValueError as exc:
@@ -512,6 +517,10 @@ async def mode_callback(update, context):
     await safe_answer(query)
     try:
         _, mode = query.data.split(':', 1)
+        if mode == 'gemini' and not MODELS['gemini'][1]:
+            await query.edit_message_text('Gemini ainda não está configurado: coloque GEMINI_API_KEY no .env e reinicie o bot.',
+                                          reply_markup=mode_keyboard())
+            return
         db.set_mode(mode)
         await query.edit_message_text(
             f'✅ *Modelo alterado com sucesso!*\n\n'
@@ -1267,7 +1276,7 @@ def main():
     app.add_handler(CallbackQueryHandler(payment_callback,pattern='^(pay|cancel):[a-f0-9]{16}$'))
     app.add_handler(CallbackQueryHandler(natural_action_callback,pattern='^nl:(confirm|cancel):[a-f0-9]{16}$'))
     app.add_handler(CallbackQueryHandler(alert_callback,pattern='^(rm:(h1|dy)|da:(pay|snz)):\\d+$'))
-    app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado)$'))
+    app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado|gemini)$'))
     # block=False: enquanto a IA pensa, botões e comandos continuam funcionando
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat,block=False))
     log.info('Iniciando o bot em long polling...')
