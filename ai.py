@@ -31,16 +31,9 @@ DADOS E REGRAS ANTI-ALUCINAÇÃO:
 - NUNCA monte projeções, somas ou saldos novos; mostre apenas números que o aplicativo forneceu.
 - NUNCA peça desculpas dizendo que 'não tem acesso ao banco de dados neste chat' nem aja como se estivesse sem os dados, pois você tem os dados fornecidos no contexto do sistema.
 - Se o usuário perguntar quanto tem a receber em determinado mês:
-  • Consulte as seções 'RENDA FIXA', 'RECEITAS ÚNICAS' e 'PREVISÃO DE RECEITAS' do perfil.
-  • Diferencie claramente o que JÁ FOI RECEBIDO do que AINDA FALTA RECEBER na data da mensagem.
-  • Em Outubro/2026:
-    - O adiantamento de R$ 935,00 já foi recebido em 15/10/2026.
-    - Falta receber em 30/10/2026: Complemento do salário (~R$ 850,00) e Contrato Municipal único (R$ 1.966,81 estimado).
-    - Total a receber restante em Outubro: R$ 2.816,81.
-  • Em Novembro/2026:
-    - Receitas previstas: Adiantamento dia 15/11 (R$ 935,00) e Complemento dia 30/11 (R$ 850,00).
-    - Total previsto para Novembro: R$ 1.785,00 (ou R$ 1.855,00 com renda extra fixa de R$ 70).
-    - O Contrato Municipal NÃO se repete em Novembro (foi parcela única em Outubro).'''
+  • Consulte as seções 'RENDA FIXA', 'RECEITAS ÚNICAS' e 'PREVISÃO DE RECEITAS' do perfil (se presentes no contexto) e as 'Últimas movimentações'.
+  • Diferencie claramente o que JÁ FOI RECEBIDO no mês atual (nas movimentações registradas) do que AINDA FALTA RECEBER conforme o perfil cadastrado.
+  • Se não houver perfil de renda cadastrado no contexto, informe apenas as receitas já registradas no mês e avise que não há previsão futura cadastrada.'''
 
 INTERPRETER_SYSTEM = r'''Você é o interpretador de mensagens de um assistente financeiro pessoal. O usuário fala em português brasileiro, informalmente. Sua única saída deve ser UM objeto JSON válido, sem Markdown, sem comentários e sem texto antes/depois.
 
@@ -211,7 +204,9 @@ def _gemini_call(model_name, api_key, messages, max_tokens=1400, temperature=0.4
     return _text_result(extract)
 
 
-_CALLERS = {'gemini': _gemini_call}
+def _call_model(name, model, api_key, messages, max_tokens, temperature):
+    caller = _gemini_call if name == 'gemini' else _http_call
+    return caller(model, api_key, messages, max_tokens, temperature)
 
 
 def _request_with_fallback(prompt, messages, max_tokens, temperature, force_model=None):
@@ -219,16 +214,24 @@ def _request_with_fallback(prompt, messages, max_tokens, temperature, force_mode
     primary = force_model or choose_model(prompt, mode)
     model, api_key = MODELS[primary]
     try:
-        return _CALLERS.get(primary, _http_call)(model, api_key, messages, max_tokens, temperature), primary, ''
+        return _call_model(primary, model, api_key, messages, max_tokens, temperature), primary, ''
     except RuntimeError as err:
-        secondary = 'rapido' if primary == 'avancado' else 'avancado'
-        if (mode != 'auto' and not force_model) or not MODELS[secondary][1] or '401' in str(err) or '403' in str(err):
+        if mode != 'auto' and not force_model:
             raise
-        try:
-            response = _http_call(MODELS[secondary][0], MODELS[secondary][1], messages, max_tokens, temperature)
-        except RuntimeError:
-            raise err from None
-        return response, secondary, '\n[Modelo alternativo utilizado por indisponibilidade do principal.]'
+        auth_err = '401' in str(err) or '403' in str(err)
+        order = ('rapido', 'avancado', 'gemini') if primary != 'rapido' else ('avancado', 'gemini')
+        for secondary in order:
+            if secondary == primary:
+                continue
+            sec_model, sec_key = MODELS.get(secondary, ('', ''))
+            if not sec_key or (auth_err and sec_key == api_key):
+                continue
+            try:
+                response = _call_model(secondary, sec_model, sec_key, messages, max_tokens, temperature)
+                return response, secondary, '\n[Modelo alternativo utilizado por indisponibilidade do principal.]'
+            except RuntimeError:
+                continue
+        raise err from None
 
 
 def _extract_json(text):

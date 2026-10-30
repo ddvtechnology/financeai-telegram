@@ -38,9 +38,17 @@ class QuickParseTests(unittest.TestCase):
 
     def test_parse_expense_and_rejects(self):
         r = quick.parse('Gastei R$ 45,90 no almoço ontem', date(2026, 10, 30))
-        self.assertEqual((r['kind'], r['amount'], r['occurred_date']), ('despesa', '45,90', '2026-10-29'))
+        self.assertEqual((r['kind'], r['amount'], r['occurred_date'], r['category']),
+                         ('despesa', '45,90', '2026-10-29', 'Alimentação'))
         self.assertIsNone(quick.parse('Recebi 10 e gastei 20', date(2026, 10, 30)))
         self.assertIsNone(quick.parse('E os valores que já recebi?', date(2026, 10, 30)))
+
+    def test_smart_offline_categories(self):
+        today = date(2026, 10, 30)
+        self.assertEqual(quick.parse('Gastei 30 de uber', today)['category'], 'Transporte')
+        self.assertEqual(quick.parse('Paguei 120 na conta de luz', today)['category'], 'Moradia')
+        self.assertEqual(quick.parse('Comprei 50 na farmácia', today)['category'], 'Saúde')
+        self.assertEqual(quick.parse('Ganhei 200 de freela', today)['category'], 'Renda Extra')
 
 
 class NeverFakeConfirmTests(unittest.TestCase):

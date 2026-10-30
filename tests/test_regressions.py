@@ -160,6 +160,72 @@ class RegressionTests(unittest.TestCase):
             self.assertTrue(res)
             m_ans.assert_called_once()
 
+    def test_refund_debt_payment_and_bot_flow(self):
+        d = db.add_debt(5000, (db.now().date() + timedelta(days=1)).isoformat(), 'Internet')
+        db.pay_debt(d, 2000)
+        self.assertEqual(db.get_debts()[0]['paid_amount'], 2000)
+        self.assertEqual(db.summary()['despesa'], 2000)
+        paid_tx = db.get_transactions(1)[0]['id']
+
+        upd = fake_update()
+        upd.message.text = f'/estornar {paid_tx}'
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}))
+        asyncio.run(bot.tx_delete(upd, ctx))
+        self.assertIn('Estornar este pagamento', upd.message.sent[0][0])
+        nonce = next(iter(ctx.application.bot_data['natural_actions']))
+
+        edits = []
+        q = SimpleNamespace(data=f'nl:confirm:{nonce}', answer=mock.AsyncMock(),
+                            edit_message_text=mock.AsyncMock(side_effect=lambda t, **k: edits.append(t)))
+        q_upd = SimpleNamespace(callback_query=q, effective_chat=SimpleNamespace(type='private'),
+                                effective_user=SimpleNamespace(id=1))
+        asyncio.run(bot.natural_action_callback(q_upd, ctx))
+        self.assertIn('estornado', edits[0])
+        self.assertEqual(db.get_debts()[0]['paid_amount'], 0)
+        self.assertEqual(db.summary()['despesa'], 0)
+        self.assertIsNone(db.get_transaction(paid_tx))
+
+    def test_recurring_list_and_delete(self):
+        rid = db.add_recurring('Academia', 9900, 12)
+        self.assertEqual(len(db.get_recurring()), 1)
+        upd = fake_update()
+        asyncio.run(bot.recurring_list(upd, SimpleNamespace()))
+        self.assertIn('Academia', upd.message.sent[0][0])
+        db.remove_recurring(rid)
+        self.assertEqual(db.get_recurring(), [])
+        with self.assertRaises(ValueError):
+            db.remove_recurring(rid)
+
+    def test_delete_reminder(self):
+        rid = db.insert_reminder((db.now() + timedelta(hours=2)).isoformat(), 'Dentista')
+        self.assertIsNotNone(db.get_reminder(rid))
+        db.delete_reminder(rid)
+        self.assertIsNone(db.get_reminder(rid))
+        with self.assertRaises(ValueError):
+            db.delete_reminder(rid)
+
+    def test_reset_all_clears_database(self):
+        db.insert_transaction('receita', 10000, 'Salário')
+        db.add_debt(5000, (db.now().date() + timedelta(days=5)).isoformat(), 'Luz')
+        db.add_recurring('Internet', 9900, 10)
+        db.insert_reminder((db.now() + timedelta(hours=1)).isoformat(), 'Teste')
+        db.set_profile({'renda_fixa': '1000'})
+        db.reset_all()
+        self.assertEqual(db.get_transactions(), [])
+        self.assertEqual(db.get_debts(), [])
+        self.assertEqual(db.get_recurring(), [])
+        self.assertEqual(db.get_reminders(), [])
+        self.assertEqual(db.get_profile(), {})
+
+    def test_import_rejects_paid_amount_greater_than_total(self):
+        data = {'contas_a_pagar': [{'titulo': 'Cartão', 'valor_total': '100.00',
+                                    'valor_pago': '150.00', 'vencimento': '2026-11-10'}]}
+        f = Path(self.dir.name) / 'bad.json'
+        f.write_text(json.dumps(data), encoding='utf-8')
+        with mock.patch('builtins.print'):
+            importar.import_financial_data(f)
+        self.assertEqual(db.get_debts(open_only=False), [])
+
 
 if __name__ == '__main__':
     unittest.main()

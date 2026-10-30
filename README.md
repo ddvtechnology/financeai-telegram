@@ -104,7 +104,9 @@ A interação diária não depende de comandos. Estes continuam disponíveis com
 - `/id` — mostra o ID do Telegram no chat privado, para configurar o proprietário.
 - `/start` e `/ajuda` — apresentação e exemplos.
 - `/receita 1870 Salário | Mensal` e `/despesa 45,90 Alimentação | Almoço` — registros estruturados antigos.
-- `/saldo`, `/conta`, `/dividas`, `/pagar`, `/historico`, `/relatorio`, `/planejar`, `/lembrete`, `/lembretes`, `/modelo` e `/backup` — atalhos administrativos.
+- `/saldo`, `/conta`, `/dividas`, `/pagar`, `/historico`, `/relatorio`, `/planejar`, `/lembrete`, `/lembretes`, `/apagar_lembrete`, `/modelo`, `/backup` e `/resetar` — atalhos administrativos.
+- `/fixa`, `/fixas` e `/excluir_fixa` — cadastro, listagem e remoção de contas fixas mensais.
+- `/apagar` e `/estornar` — remoção de lançamentos avulsos ou estorno de pagamento de dívida.
 - `/hora` — mostra o relógio e o fuso que o bot usa (confira se bate com o celular) e os próximos lembretes.
 - `/bateria` — mostra a porcentagem da bateria do celular (precisa do Termux:API, veja abaixo).
 

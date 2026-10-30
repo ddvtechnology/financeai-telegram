@@ -108,15 +108,18 @@ def import_financial_data(filepath):
             if exists:
                 print(f"  [Conta já existe] {title} | {db.brl(amount)} | {db.short_date(due_date)} (ignorada)")
                 continue
-            debt_id = db.add_debt(amount=amount, due_date=due_date, title=title)
 
-            # Se houver pagamento parcial registrado
             paid_raw = d.get('valor_pago')
+            paid_amount = 0
             if paid_raw is not None and str(paid_raw).strip() not in ('', '0', '0.0', '0.00', '0,00'):
                 paid_amount = db.money_to_cents(paid_raw)
-                if paid_amount > 0:
-                    with db.conn() as c:
-                        c.execute("UPDATE debts SET paid_amount = ? WHERE id = ?", (paid_amount, debt_id))
+                if paid_amount > amount:
+                    raise ValueError(f"Valor pago ({db.brl(paid_amount)}) não pode ser maior que o total ({db.brl(amount)})")
+
+            debt_id = db.add_debt(amount=amount, due_date=due_date, title=title)
+            if paid_amount > 0:
+                with db.conn() as c:
+                    c.execute("UPDATE debts SET paid_amount = ? WHERE id = ?", (paid_amount, debt_id))
 
             count_debts += 1
             print(f"  [Conta #{debt_id}] {title} | Total: {db.brl(amount)} | Vence: {db.short_date(due_date)}")

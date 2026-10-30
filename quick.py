@@ -13,8 +13,36 @@ _AMOUNT = re.compile(r'(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[,.]\d
 _LEAD = re.compile(r'^(?:de|do|da|dos|das|com|no|na|em|pelo|pela|por|pra|para)\s+', re.I)
 
 
+_EXPENSE_CATEGORIES = (
+    ('Alimentação', ('almoco', 'jantar', 'lanche', 'cafe', 'padaria', 'mercado', 'supermercado',
+                     'feira', 'restaurante', 'ifood', 'pizza', 'comida', 'acougue', 'hortifruti')),
+    ('Transporte', ('uber', '99', 'taxi', 'onibus', 'metro', 'passagem', 'combustivel',
+                    'gasolina', 'etanol', 'estacionamento', 'pedagio', 'oficina', 'moto', 'carro')),
+    ('Moradia', ('aluguel', 'condominio', 'luz', 'energia', 'agua', 'internet', 'gas', 'iptu', 'casa', 'reforma')),
+    ('Saúde', ('farmacia', 'remedio', 'medico', 'consulta', 'exame', 'dentista', 'hospital', 'academia')),
+    ('Educação', ('faculdade', 'curso', 'escola', 'livro', 'apostila', 'mensalidade')),
+    ('Lazer', ('cinema', 'show', 'viagem', 'passeio', 'bar', 'cerveja', 'streaming', 'netflix', 'spotify', 'jogo')),
+    ('Vestuário', ('roupa', 'camisa', 'calca', 'sapato', 'tenis')),
+    ('Cuidados Pessoais', ('cabelo', 'barbearia', 'salao', 'perfume', 'cosmetico')),
+)
+
+
 def _plain(text):
     return unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('ascii').lower()
+
+
+def _infer_category(kind, plain):
+    words = set(re.findall(r'[a-z0-9]+', plain))
+    if kind == 'receita':
+        if words & {'salario', 'adiantamento', 'complemento', 'decimo', '13o', 'ferias', 'folha'}:
+            return 'Salário'
+        if words & {'freela', 'freelance', 'bico', 'extra', 'venda', 'comissao'}:
+            return 'Renda Extra'
+        return 'Receita'
+    for cat, keywords in _EXPENSE_CATEGORIES:
+        if words & set(keywords):
+            return cat
+    return 'Outros'
 
 
 def parse(text, today):
@@ -33,10 +61,7 @@ def parse(text, today):
     desc = re.sub(r'\s+', ' ', desc).strip(' ,.-')
     desc = _LEAD.sub('', desc).strip()
     plain = _plain(desc)
-    if kind == 'receita':
-        category = 'Salário' if 'salario' in plain else 'Receita'
-    else:
-        category = 'Outros'
+    category = _infer_category(kind, plain)
     day = today - timedelta(days=1) if re.search(r'\bontem\b', _plain(text)) else today
     return {'type': 'transaction', 'kind': kind, 'amount': a.group(1),
             'category': category, 'description': desc[:1].upper() + desc[1:] if desc else category,

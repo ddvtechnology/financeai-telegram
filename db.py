@@ -235,6 +235,26 @@ def delete_transaction(tx_id):
         c.execute('DELETE FROM transactions WHERE id=?', (tx_id,))
 
 
+def refund_debt_payment(tx_id):
+    """Estorna um pagamento de dívida de forma atômica, restaurando o saldo da conta."""
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        tx = c.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
+        if not tx:
+            raise ValueError('Lançamento não encontrado.')
+        debt_id = tx['debt_id']
+        if not debt_id:
+            raise ValueError('Este lançamento não é um pagamento de dívida.')
+        amount = tx['amount']
+        c.execute('DELETE FROM debt_payments WHERE transaction_id=?', (tx_id,))
+        c.execute('UPDATE debts SET paid_amount=MAX(0, paid_amount-?) WHERE id=?', (amount, debt_id))
+        c.execute('DELETE FROM transactions WHERE id=?', (tx_id,))
+        d = c.execute('SELECT * FROM debts WHERE id=?', (debt_id,)).fetchone()
+        remaining = (d['original_amount'] - d['paid_amount']) if d else 0
+        return {'debt_id': debt_id, 'title': d['title'] if d else tx['description'],
+                'amount': amount, 'remaining': remaining}
+
+
 def transaction_exists(kind, amount, category, description, day):
     """Usado pela importação para não duplicar lançamentos idênticos no mesmo dia."""
     with conn() as c:
@@ -322,6 +342,18 @@ def mark_reminder(rid):
 def get_reminders():
     with conn() as c:
         return [dict(r) for r in c.execute('SELECT * FROM reminders WHERE sent_at IS NULL ORDER BY due_at LIMIT 15')]
+
+
+def get_reminder(rid):
+    with conn() as c:
+        row = c.execute('SELECT * FROM reminders WHERE id=? AND sent_at IS NULL', (rid,)).fetchone()
+    return dict(row) if row else None
+
+
+def delete_reminder(rid):
+    with conn() as c:
+        if c.execute('DELETE FROM reminders WHERE id=? AND sent_at IS NULL', (rid,)).rowcount == 0:
+            raise ValueError(f'Lembrete pendente #{rid} não encontrado.')
 
 
 def set_mode(mode):
@@ -514,3 +546,28 @@ def generate_recurring(month=None):
             c.execute('UPDATE recurring_bills SET last_generated=? WHERE id=?', (month, r['id']))
             created.append(cur.lastrowid)
     return created
+
+
+def get_recurring(active_only=True):
+    sql = 'SELECT * FROM recurring_bills'
+    if active_only:
+        sql += ' WHERE active=1'
+    sql += ' ORDER BY day, id'
+    with conn() as c:
+        return [dict(r) for r in c.execute(sql)]
+
+
+def remove_recurring(rec_id):
+    with conn() as c:
+        if c.execute('DELETE FROM recurring_bills WHERE id=?', (rec_id,)).rowcount == 0:
+            raise ValueError(f'Conta fixa #{rec_id} não encontrada.')
+
+
+def reset_all():
+    """Zera todos os registros financeiros, contas, lembretes, perfil e histórico."""
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        for table in ('debt_payments', 'debt_notifications', 'transactions', 'debts',
+                      'recurring_bills', 'reminders', 'messages', 'preferences'):
+            c.execute(f'DELETE FROM {table}')
+        c.execute('DELETE FROM sqlite_sequence')

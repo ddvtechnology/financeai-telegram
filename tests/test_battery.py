@@ -124,6 +124,7 @@ class BatteryJobTests(unittest.TestCase):
 
 
 
+@unittest.skipIf(os.name == 'nt', 'Comandos do termux-battery-status exigem ambiente Termux/POSIX')
 class BatteryCommandTests(unittest.TestCase):
     def fake_command(self, body):
         tmp = tempfile.TemporaryDirectory()

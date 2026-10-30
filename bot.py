@@ -8,6 +8,7 @@ except ImportError:
     fcntl = None
 import io
 import logging
+from logging.handlers import RotatingFileHandler
 import re
 import secrets
 import sqlite3
@@ -36,6 +37,21 @@ for _noisy in ('httpx', 'httpcore'):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger('financeai')
 LOCK = None
+
+
+def setup_file_logging(log_dir=None):
+    """Configura rotação automática do log em arquivo para não encher o armazenamento do celular."""
+    target = Path(log_dir or (BASE / 'logs'))
+    target.mkdir(parents=True, exist_ok=True)
+    log_file = (target / 'bot.log').resolve()
+    root = logging.getLogger()
+    for h in root.handlers:
+        if isinstance(h, RotatingFileHandler) and Path(getattr(h, 'baseFilename', '')).resolve() == log_file:
+            return log_file
+    handler = RotatingFileHandler(log_file, maxBytes=1_000_000, backupCount=3, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    root.addHandler(handler)
+    return log_file
 
 HELP = '''FinanceAI — seu assistente financeiro pessoal
 
@@ -224,14 +240,19 @@ async def movement(update, context):
 
 async def tx_delete(update, context):
     if not await guard(update): return
-    m = re.match(r'^/apagar(?:@\w+)?\s+(\d+)\s*$', update.message.text.strip())
+    m = re.match(r'^/(?:apagar|estornar)(?:@\w+)?\s+(\d+)\s*$', update.message.text.strip())
     if not m:
-        await say(update, 'Formato: /apagar <id do lançamento>\nVeja os ids em /historico.'); return
+        await say(update, 'Formato: /apagar <id do lançamento> (ou /estornar <id>)\nVeja os ids em /historico.'); return
     tx = db.get_transaction(int(m.group(1)))
     if not tx:
         await say(update, 'Lançamento não encontrado.'); return
     if tx['debt_id']:
-        await say(update, 'Este lançamento é pagamento de dívida e não pode ser apagado por aqui.'); return
+        action = {'type': 'tx_refund_debt', 'tx_id': tx['id']}
+        await ask_action_confirmation(update, context, action,
+            f'Estornar este pagamento de dívida?\n\n#{tx["id"]} Pagamento de {db.brl(tx["amount"])}\n'
+            f'Conta: {tx["description"]} (Dívida #{tx["debt_id"]})\nData: {db.short_date(tx["occurred_at"])}\n\n'
+            'O valor voltará a ficar em aberto na conta e o lançamento será removido.')
+        return
     action = {'type': 'tx_delete', 'tx_id': tx['id']}
     await ask_action_confirmation(update, context, action,
         f'Apagar este lançamento?\n\n#{tx["id"]} {tx["kind"].capitalize()} {db.brl(tx["amount"])}\n'
@@ -250,6 +271,33 @@ async def recurring_add(update, context):
         await say(update, f'✅ Conta fixa #{rid} cadastrada: {m.group(3).strip()} — todo dia {int(m.group(2))}.{extra}')
     except ValueError as exc:
         await say(update, str(exc))
+
+
+async def recurring_list(update, context):
+    if not await guard(update): return
+    rows = db.get_recurring()
+    if not rows:
+        await say(update, 'Não há contas fixas mensais cadastradas.\nUse: /fixa <valor> <dia 1-28> <nome>'); return
+    lines = ['🔁 *CONTAS FIXAS MENSAIS:*\n']
+    for r in rows:
+        lines.append(f'• *#{r["id"]} {r["title"]}* — {db.brl(r["amount"])} (todo dia {r["day"]:02d})')
+    lines.append('\nPara remover: `/excluir_fixa <id>`')
+    await say(update, '\n'.join(lines))
+
+
+async def recurring_delete(update, context):
+    if not await guard(update): return
+    m = re.match(r'^/excluir_fixa(?:@\w+)?\s+(\d+)\s*$', update.message.text.strip())
+    if not m:
+        await say(update, 'Formato: /excluir_fixa <id>\nVeja os ids em /fixas.'); return
+    rec_id = int(m.group(1))
+    rec = next((r for r in db.get_recurring(active_only=False) if r['id'] == rec_id), None)
+    if not rec:
+        await say(update, f'Conta fixa #{rec_id} não encontrada.'); return
+    action = {'type': 'recurring_delete', 'rec_id': rec_id, 'title': rec['title']}
+    await ask_action_confirmation(update, context, action,
+        f'Excluir a conta fixa mensal #{rec_id} ({rec["title"]} — {db.brl(rec["amount"])}, dia {rec["day"]:02d})?\n'
+        'Ela deixará de gerar novas contas nos próximos meses.')
 
 
 async def balance(update, context):
@@ -471,7 +519,24 @@ async def reminder_list(update, context):
     if not await guard(update):return
     rows=db.get_reminders()
     if not rows:await say(update,'Não há lembretes pendentes.');return
-    await say(update,'LEMBRETES:\n'+'\n'.join(f'#{r["id"]} {datetime.fromisoformat(r["due_at"]).strftime("%d/%m/%Y %H:%M")} — {r["content"]}' for r in rows))
+    lines = ['LEMBRETES:\n' + '\n'.join(f'#{r["id"]} {datetime.fromisoformat(r["due_at"]).strftime("%d/%m/%Y %H:%M")} — {r["content"]}' for r in rows),
+             '\nPara cancelar um lembrete: /apagar_lembrete <id>']
+    await say(update, '\n'.join(lines))
+
+
+async def reminder_delete(update, context):
+    if not await guard(update): return
+    m = re.match(r'^/apagar_lembrete(?:@\w+)?\s+(\d+)\s*$', update.message.text.strip())
+    if not m:
+        await say(update, 'Formato: /apagar_lembrete <id>\nVeja os ids em /lembretes.'); return
+    rid = int(m.group(1))
+    rem = db.get_reminder(rid)
+    if not rem:
+        await say(update, f'Lembrete pendente #{rid} não encontrado.'); return
+    due_str = datetime.fromisoformat(rem['due_at']).astimezone(TZ).strftime('%d/%m/%Y %H:%M')
+    action = {'type': 'reminder_delete', 'rid': rid, 'content': rem['content']}
+    await ask_action_confirmation(update, context, action,
+        f'Cancelar este lembrete?\n\n#{rid} {due_str} — {rem["content"]}')
 
 
 def mode_keyboard():
@@ -551,6 +616,15 @@ async def backup(update, context):
         outfile = make_backup(tmp)
         with outfile.open('rb') as f:
             await update.message.reply_document(f,filename=outfile.name,caption='Backup completo: mantenha este arquivo privado. Faça cópias fora do celular.')
+
+
+async def reset_db_cmd(update, context):
+    if not await guard(update): return
+    action = {'type': 'reset_all'}
+    await ask_action_confirmation(update, context, action,
+        '⚠️ ATENÇÃO: Deseja realmente ZERAR todo o banco de dados (transações, contas a pagar, '
+        'contas fixas, lembretes, perfil e histórico)?\n\n'
+        'Um backup completo será enviado automaticamente neste chat antes de limpar tudo.')
 
 
 TYPING_INTERVAL = 4
@@ -703,7 +777,7 @@ async def _chat(update, context):
         await say(update, result_text)
     except RuntimeError as exc:
         log.warning('Falha na IA: %s', exc)
-        await say(update, 'Não consegui interpretar sua mensagem pela NVIDIA: ' + str(exc))
+        await say(update, 'Não consegui processar sua mensagem pela IA: ' + str(exc))
     except Exception:
         log.exception('Erro inesperado sem registrar a mensagem')
         await say(update, 'Ocorreu um erro inesperado. Nenhum lançamento foi feito. Tente novamente ou verifique o log do Termux.')
@@ -973,6 +1047,31 @@ async def natural_action_callback(update, context):
             db.delete_transaction(int(action['tx_id']))
             await query.edit_message_text(
                 f'🗑️ Lançamento #{action["tx_id"]} apagado.\nSaldo histórico registrado: {db.brl(db.summary()["total"])}')
+        elif action_type == 'tx_refund_debt':
+            info = db.refund_debt_payment(int(action['tx_id']))
+            await query.edit_message_text(
+                f'↩️ Pagamento #{action["tx_id"]} estornado ({db.brl(info["amount"])}).\n'
+                f'Conta “{info["title"]}”: restante voltou para {db.brl(info["remaining"])}.\n'
+                f'Saldo histórico registrado: {db.brl(db.summary()["total"])}')
+        elif action_type == 'recurring_delete':
+            db.remove_recurring(int(action['rec_id']))
+            await query.edit_message_text(
+                f'🗑️ Conta fixa #{action["rec_id"]} ({action.get("title", "")}) excluída.')
+        elif action_type == 'reminder_delete':
+            db.delete_reminder(int(action['rid']))
+            await query.edit_message_text(
+                f'🗑️ Lembrete #{action["rid"]} cancelado.')
+        elif action_type == 'reset_all':
+            if getattr(query, 'message', None) and hasattr(query.message, 'reply_document'):
+                with tempfile.TemporaryDirectory() as tmp:
+                    outfile = make_backup(tmp)
+                    with outfile.open('rb') as f:
+                        await query.message.reply_document(
+                            f, filename=outfile.name,
+                            caption='🗄 Backup de segurança gerado antes de zerar o banco.')
+            db.reset_all()
+            await query.edit_message_text(
+                '🧹 Banco de dados zerado com sucesso! Todos os registros foram limpos para você começar do zero.')
         elif action_type == 'reminder':
             reminder_id = db.insert_reminder(action['due_at'], action['content'])
             reminder_time = datetime.fromisoformat(action['due_at']).astimezone(TZ)
@@ -1246,7 +1345,7 @@ async def on_stop(app):
 def main():
     global LOCK
     if not TOKEN:raise SystemExit('Configure TELEGRAM_BOT_TOKEN no arquivo .env.')
-    BASE.joinpath('logs').mkdir(exist_ok=True)
+    setup_file_logging()
     LOCK=open(BASE/'data'/'financeai.lock','w') if (BASE/'data').is_dir() else None
     if LOCK is None:
         (BASE/'data').mkdir(parents=True,exist_ok=True)
@@ -1269,8 +1368,11 @@ def main():
     app.add_error_handler(on_error)
     routes={'id':show_id,'start':start,'ajuda':help_cmd,'receita':movement,'despesa':movement,
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
-            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,'lembretes':reminder_list,
-            'modelo':mode_set,'backup':backup,'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'fixa':recurring_add}
+            'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,
+            'lembretes':reminder_list,'apagar_lembrete':reminder_delete,
+            'modelo':mode_set,'backup':backup,'resetar':reset_db_cmd,
+            'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'estornar':tx_delete,
+            'fixa':recurring_add,'fixas':recurring_list,'excluir_fixa':recurring_delete}
     for name, handler in routes.items():
         app.add_handler(CommandHandler(name,handler))
     app.add_handler(CallbackQueryHandler(payment_callback,pattern='^(pay|cancel):[a-f0-9]{16}$'))

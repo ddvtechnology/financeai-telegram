@@ -85,6 +85,20 @@ class GeminiTests(unittest.TestCase):
             asyncio.run(ai.answer('explique juros compostos'))
         self.assertEqual(used, ['gemini', 'gemini'])
 
+    def test_auto_mode_falls_back_to_gemini_when_nvidia_fails(self):
+        db.set_mode('auto')
+        with mock.patch.dict(ai.MODELS, {'rapido': ('m1', 'nvkey'), 'avancado': ('m2', 'nvkey'), 'gemini': ('g1', 'gemkey')}), \
+                mock.patch.object(ai, '_http_call', side_effect=RuntimeError('API NVIDIA indisponível: HTTP 503.')), \
+                mock.patch.object(ai, '_gemini_call', return_value=ai._Text('Salvo pelo Gemini')):
+            resp, used, note = ai._request_with_fallback('oi', [{'role': 'user', 'content': 'oi'}], 500, 0.3)
+        self.assertEqual((resp, used), ('Salvo pelo Gemini', 'gemini'))
+        self.assertIn('alternativo', note)
+
+    def test_system_prompt_has_no_hardcoded_dates_or_amounts(self):
+        self.assertNotIn('1.966,81', ai.SYSTEM)
+        self.assertNotIn('2.816,81', ai.SYSTEM)
+        self.assertNotIn('Outubro/2026', ai.SYSTEM)
+
 
 if __name__ == '__main__':
     unittest.main()
