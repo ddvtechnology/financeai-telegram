@@ -102,6 +102,12 @@ def import_financial_data(filepath):
                 raise ValueError("Data de vencimento é obrigatória (AAAA-MM-DD)")
             date.fromisoformat(due_date)
 
+            with db.conn() as c:
+                exists = c.execute('SELECT 1 FROM debts WHERE title=? AND original_amount=? AND due_date=?',
+                                   (title[:180], amount, due_date)).fetchone()
+            if exists:
+                print(f"  [Conta já existe] {title} | {db.brl(amount)} | {db.short_date(due_date)} (ignorada)")
+                continue
             debt_id = db.add_debt(amount=amount, due_date=due_date, title=title)
 
             # Se houver pagamento parcial registrado

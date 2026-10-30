@@ -561,7 +561,23 @@ class Waiting:
             await asyncio.gather(self.task, return_exceptions=True)
 
 
+INSTANT_TEXTS = {normalized(t) for t in ('💰 Saldo', '➕ Registrar receita', '➖ Registrar despesa',
+                                          '📅 Contas a pagar', '📊 Relatório', '⚙️ Modelo de IA')}
+
+
 async def chat(update, context):
+    """Mensagens do mesmo usuário são tratadas em ordem: a resposta rápida a uma pergunta da IA
+    (ex.: "50 reais") só é lida depois que o rascunho anterior existir. Atalhos não esperam."""
+    prompt = ((update.message.text if update.message else '') or '').strip()
+    if update.effective_user is None or not allowed(update) or normalized(prompt) in INSTANT_TEXTS or asks_battery(prompt):
+        await _chat(update, context)
+        return
+    lock = context.application.bot_data.setdefault('chat_locks', {}).setdefault(update.effective_user.id, asyncio.Lock())
+    async with lock:
+        await _chat(update, context)
+
+
+async def _chat(update, context):
     if not await guard(update): return
     prompt = (update.message.text or '').strip()
     if not prompt: return
@@ -831,7 +847,7 @@ async def dispatch_natural_query(update, context, query):
                   r'dia\s+\d|^\d+º|útil|fatura|adiantamento|renda|empréstimo)\b', prompt, re.I)
     ):
         # Redireciona para resposta conversacional em vez de exibir o tutorial
-        log.info('Guardrail: query help bloqueado para mensagem financeira: %.80s', prompt)
+        log.info('Guardrail: query help bloqueado para mensagem financeira')
         result_text = await ai.answer(prompt)
         await say(update, result_text)
         return True
@@ -840,7 +856,7 @@ async def dispatch_natural_query(update, context, query):
     if str(query or '').strip().lower() == 'debts' and (
         re.search(r'\b(receb|sal[aá]rio|complemento|adiantamento|ganh|renda|prefeitura|contrato|a receber)\b', prompt, re.I)
     ):
-        log.info('Guardrail: query debts bloqueado para mensagem de recebimento: %.80s', prompt)
+        log.info('Guardrail: query debts bloqueado para mensagem de recebimento')
         result_text = await ai.answer(prompt)
         await say(update, result_text)
         return True
@@ -1117,7 +1133,7 @@ def reminder_text(reminder, now=None):
 def debt_alert_text(debt):
     days = debt['days_left']
     title = html.escape(str(debt['title']))
-    head = ('📅 <b>Conta vencendo em 3 dias!</b>' if days == 3 else
+    head = (f'📅 <b>Conta vencendo em {days} dias!</b>' if days >= 2 else
             '⚠️ <b>Conta vence amanhã!</b>' if days == 1 else
             '🔴 <b>Conta vence HOJE!</b>' if days == 0 else '❗ <b>Conta em atraso!</b>')
     due = db.short_date(debt['due_date'])

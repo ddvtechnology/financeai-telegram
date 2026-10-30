@@ -20,10 +20,11 @@ _NUM = r'\d+|' + '|'.join(NUMBERS)
 _PREFIX = r'(?:daqui(?:\s+a)?|dentro\s+de|de\s+aqui\s+a|em)'
 _HALF_AND_HALF = re.compile(rf'\b{_PREFIX}\s+uma\s+hora\s+e\s+meia\b')
 _HALF = re.compile(rf'\b{_PREFIX}\s+meia\s+hora\b')
-_REL = re.compile(rf'\b{_PREFIX}\s+({_NUM})\s*(?:h\s*(\d{{1,2}})\b|(min(?:uto)?s?|horas?|hs?|dias?)\b)')
+_REL = re.compile(rf'\b{_PREFIX}\s+({_NUM})\s*(?:h\s*(\d{{1,2}})\b|(min(?:uto)?s?|horas?|hs?|dias?)\b(?:\s+e\s+(meia|\d{{1,2}}\s*min(?:uto)?s?)\b)?)')
 _COLON = re.compile(r'\b([01]?\d|2[0-3]):([0-5]\d)\b')
 _HOUR = re.compile(r'\b([01]?\d|2[0-3])\s*(?:h|horas?)\s*([0-5]\d)?\b')
-_AS = re.compile(r'\bas\s+([01]?\d|2[0-3])\b(?!\s*(?:/|:|de\b|dias?\b|reais\b|h\b))')
+_AS_ACCENT = re.compile(r'@as\s+([01]?\d|2[0-3])\b(?!\s*(?:/|:|de\b|dias?\b|reais\b|h\b))')
+_AS_PLAIN = re.compile(r'\bas\s+([01]?\d|2[0-3])\b(?!\s*(?:/|:|[a-z]))')
 _PERIOD_HOUR = re.compile(r'\b([01]?\d|2[0-3])\s+(?=(?:da|de|a|pela|na|do)?\s*(?:manha|tarde|noite|madrugada)\b)')
 _NOON = re.compile(r'\bmeio\s+dia\b')
 _MIDNIGHT = re.compile(r'\bmeia\s+noite\b')
@@ -38,8 +39,9 @@ _WORDS = {'after_tomorrow': re.compile(r'\bdepois\s+de\s+amanha\b'),
 
 
 def _norm(text):
-    t = unicodedata.normalize('NFKD', str(text or '')).encode('ascii', 'ignore').decode('ascii').lower()
-    t = re.sub(r'[^a-z0-9:/\s]', ' ', t)
+    raw = re.sub(r'(?i)\bàs?\b', ' @as ', str(text or ''))  # guarda a diferença entre "às" (hora) e "as" (artigo)
+    t = unicodedata.normalize('NFKD', raw).encode('ascii', 'ignore').decode('ascii').lower()
+    t = re.sub(r'[^a-z0-9:/@\s]', ' ', t)
     return re.sub(r'\s+', ' ', t).strip()
 
 
@@ -69,6 +71,8 @@ def _relative(t):
                 minutes, days = None, n
             else:
                 minutes, days = n * 60, None
+                if m.group(4):  # "2 horas e meia", "1 hora e 30 minutos"
+                    minutes += 30 if m.group(4) == 'meia' else int(re.match(r'\d+', m.group(4)).group())
         last = m.start()
     t = _HALF_AND_HALF.sub(' ', t)
     t = _HALF.sub(' ', t)
@@ -83,8 +87,9 @@ def _clock(t):
         found.append((m.end(), int(m.group(1)), int(m.group(2)), m.end()))
     for m in _HOUR.finditer(t):
         found.append((m.end(), int(m.group(1)), int(m.group(2) or 0), m.end()))
-    for m in _AS.finditer(t):
-        found.append((m.end(), int(m.group(1)), 0, m.end()))
+    for rx in (_AS_ACCENT, _AS_PLAIN):
+        for m in rx.finditer(t):
+            found.append((m.end(), int(m.group(1)), 0, m.end()))
     for m in _PERIOD_HOUR.finditer(t):
         found.append((m.end(), int(m.group(1)), 0, m.end(1)))
     for m in _NOON.finditer(t):

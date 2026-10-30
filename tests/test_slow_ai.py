@@ -29,7 +29,10 @@ def make_server(script):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # o cliente já desistiu (teste de timeout)
 
         def log_message(self, *a):
             pass

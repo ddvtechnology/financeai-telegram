@@ -53,10 +53,10 @@ def short_date(iso):
 @contextlib.contextmanager
 def conn():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(DB_PATH, timeout=15)
+    c = sqlite3.connect(DB_PATH, timeout=5)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA foreign_keys=ON')
-    c.execute('PRAGMA busy_timeout=15000')
+    c.execute('PRAGMA busy_timeout=5000')
     try:
         with c:
             yield c
@@ -129,6 +129,12 @@ def init():
         ''')
 
 
+def _check_date_window(day, years=10):
+    """Rejeita datas absurdas (ex.: 0001-01-01 ou 9999-12-31) vindas da IA ou de importação."""
+    if abs((day - now().date()).days) > 365 * years:
+        raise ValueError('Data fora do intervalo permitido (até 10 anos).')
+
+
 def insert_transaction(kind, amount, category, description='', occurred_date=None):
     if kind not in ('receita', 'despesa') or amount <= 0 or not category.strip():
         raise ValueError('Lançamento inválido')
@@ -138,6 +144,7 @@ def insert_transaction(kind, amount, category, description='', occurred_date=Non
             day = date.fromisoformat(str(occurred_date))
         except ValueError:
             raise ValueError('Data do lançamento inválida.') from None
+        _check_date_window(day)
         current = now()
         stamp = datetime.combine(day, current.timetz().replace(tzinfo=None), tzinfo=TZ).isoformat()
     with conn() as c:
@@ -147,8 +154,9 @@ def insert_transaction(kind, amount, category, description='', occurred_date=Non
 
 
 def add_debt(amount, due_date, title):
-    if amount <= 0 or not title.strip() or date.fromisoformat(due_date) is None:
+    if amount <= 0 or not title.strip():
         raise ValueError('Conta inválida')
+    _check_date_window(date.fromisoformat(due_date))
     with conn() as c:
         cur = c.execute('''INSERT INTO debts(title,original_amount,due_date,created_at)
             VALUES(?,?,?,?)''',(title.strip()[:180], amount, due_date, now().isoformat()))
@@ -196,6 +204,8 @@ def update_debt(debt_id, new_amount, new_due_date=None, new_title=None):
         title = (new_title.strip()[:180] if new_title else d['title'])
         c.execute('UPDATE debts SET original_amount=?, due_date=?, title=? WHERE id=?',
                   (new_amount, due, title, debt_id))
+        if due != d['due_date']:
+            c.execute('DELETE FROM debt_notifications WHERE debt_id=?', (debt_id,))
         return new_amount - d['paid_amount']
 
 
@@ -369,7 +379,7 @@ def get_debts_due_soon():
     for d in rows:
         due = date.fromisoformat(d['due_date'])
         days_left = (due - today).days
-        if days_left == 3:
+        if days_left == 3 or (days_left == 2 and d['created_at'][:10] < today.isoformat()):
             alert_type = '3d'
         elif days_left == 1:
             alert_type = '1d'
@@ -482,9 +492,11 @@ def ai_context():
 def add_recurring(title, amount, day):
     if amount <= 0 or not title.strip() or not 1 <= int(day) <= 28:
         raise ValueError('Conta fixa inválida (dia entre 1 e 28).')
+    # Se o dia deste mês já passou, a 1ª conta vem só no próximo mês (não nasce atrasada).
+    last = now().strftime('%Y-%m') if int(day) < now().day else None
     with conn() as c:
-        return c.execute('INSERT INTO recurring_bills(title,amount,day) VALUES(?,?,?)',
-                         (title.strip()[:180], amount, int(day))).lastrowid
+        return c.execute('INSERT INTO recurring_bills(title,amount,day,last_generated) VALUES(?,?,?,?)',
+                         (title.strip()[:180], amount, int(day), last)).lastrowid
 
 
 def generate_recurring(month=None):
