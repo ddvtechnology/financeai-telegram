@@ -110,3 +110,23 @@ class HistoryShortcutTests(unittest.TestCase):
         finally:
             db.DB_PATH = old
             d.cleanup()
+
+
+class OverpayTests(unittest.TestCase):
+    def test_overpay_offers_quitacao_not_loop(self):
+        d = tempfile.TemporaryDirectory()
+        old = db.DB_PATH
+        db.DB_PATH = Path(d.name) / 'o.sqlite3'
+        db.init()
+        try:
+            db.add_debt(14000, '2026-11-01', 'Cabelo')
+            res = {'type': 'debt_payment', 'title': 'Cabelo', 'amount': '175'}
+            with mock.patch.object(ai, 'interpret_message', mock.AsyncMock(return_value=res)):
+                replies = run_chat('Paguei do cabelo 175')
+            self.assertEqual(len(replies), 1)
+            self.assertIn('R$ 140,00', replies[0][0])
+            self.assertIn('R$ 35,00', replies[0][0])
+            self.assertIsNotNone(replies[0][1])
+        finally:
+            db.DB_PATH = old
+            d.cleanup()

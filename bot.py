@@ -822,8 +822,13 @@ async def prepare_natural_debt_payment(update, context, result, prompt, previous
                 'Qual foi o valor pago? Informe em reais, por exemplo R$ 100,00.', previous)
             return
     if amount > remaining:
-        await store_clarification(update, context, prompt, result,
-            f'O valor informado é maior que o restante de {db.brl(remaining)}. Quanto você pagou dessa conta?', previous)
+        # Não repete a pergunta em loop: oferece quitar só o que falta e deixa a diferença explícita.
+        context.application.bot_data.setdefault('natural_drafts', {}).pop(user_id, None)
+        action = {'type': 'debt_payment', 'debt_id': debt['id'], 'amount': remaining, 'title': debt['title']}
+        await ask_action_confirmation(update, context, action,
+            f'Você informou {db.brl(amount)}, mas a conta “{debt["title"]}” só tem {db.brl(remaining)} em aberto.\n\n'
+            f'Posso registrar a quitação de {db.brl(remaining)}? A diferença de {db.brl(amount - remaining)} '
+            f'NÃO será lançada; se foi um gasto extra, registre-o à parte (ex.: “gastei {db.brl(amount - remaining)[3:]} com gorjeta”).')
         return
 
     action = {'type': 'debt_payment', 'debt_id': debt['id'], 'amount': amount, 'title': debt['title']}
