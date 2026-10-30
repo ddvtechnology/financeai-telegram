@@ -226,6 +226,20 @@ class RegressionTests(unittest.TestCase):
             importar.import_financial_data(f)
         self.assertEqual(db.get_debts(open_only=False), [])
 
+    def test_meus_dados_json_imports_cleanly_and_idempotently(self):
+        meus_dados = Path(__file__).resolve().parents[1] / 'meus_dados.json'
+        with mock.patch('builtins.print'):
+            stats1 = importar.import_financial_data(meus_dados)
+            stats2 = importar.import_financial_data(meus_dados)
+        self.assertEqual(stats1['errors'], [])
+        self.assertEqual(stats1['recurring'], 5)
+        self.assertEqual(stats1['debts'], 26)  # 21 parcelas + 5 contas fixas de nov/2026
+        self.assertEqual(stats1['profile'], 4)
+        self.assertEqual(stats2['debts'], 0)
+        self.assertEqual(stats2['recurring'], 0)
+        self.assertEqual(len(db.get_debts()), 26)
+        self.assertEqual(len(db.get_recurring()), 5)
+
 
 if __name__ == '__main__':
     unittest.main()

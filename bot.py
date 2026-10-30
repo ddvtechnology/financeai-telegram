@@ -26,6 +26,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
 import ai
 import battery
 import db
+import importar
 import quick
 import when
 from config import (BASE, BATTERY_ALERTS, BATTERY_FULL_ALERT, BATTERY_LEVELS, MORNING_HOUR,
@@ -627,6 +628,20 @@ async def reset_db_cmd(update, context):
         'Um backup completo será enviado automaticamente neste chat antes de limpar tudo.')
 
 
+async def import_cmd(update, context):
+    if not await guard(update): return
+    target = BASE / 'importar.json'
+    if not target.is_file():
+        target = BASE / 'meus_dados.json'
+    if not target.is_file():
+        await say(update, 'Nenhum arquivo importar.json ou meus_dados.json encontrado na pasta do projeto.')
+        return
+    action = {'type': 'import_file', 'path': str(target)}
+    await ask_action_confirmation(update, context, action,
+        f'📦 Deseja importar os dados do arquivo “{target.name}” (perfil de renda, contas fixas mensais e contas/parcelas)?\n\n'
+        'A importação é segura e não duplica registros que já existam.')
+
+
 TYPING_INTERVAL = 4
 SLOW_NOTICE_AFTER = 25
 
@@ -1072,6 +1087,14 @@ async def natural_action_callback(update, context):
             db.reset_all()
             await query.edit_message_text(
                 '🧹 Banco de dados zerado com sucesso! Todos os registros foram limpos para você começar do zero.')
+        elif action_type == 'import_file':
+            stats = importar.import_financial_data(action['path']) or {}
+            await query.edit_message_text(
+                f'✅ Importação concluída!\n'
+                f'• Contas/parcelas cadastradas: {stats.get("debts", 0)}\n'
+                f'• Contas fixas mensais: {stats.get("recurring", 0)}\n'
+                f'• Lançamentos: {stats.get("transactions", 0)}\n'
+                f'• Campos de perfil/renda: {stats.get("profile", 0)}')
         elif action_type == 'reminder':
             reminder_id = db.insert_reminder(action['due_at'], action['content'])
             reminder_time = datetime.fromisoformat(action['due_at']).astimezone(TZ)
@@ -1370,7 +1393,7 @@ def main():
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
             'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,
             'lembretes':reminder_list,'apagar_lembrete':reminder_delete,
-            'modelo':mode_set,'backup':backup,'resetar':reset_db_cmd,
+            'modelo':mode_set,'backup':backup,'resetar':reset_db_cmd,'importar':import_cmd,
             'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'estornar':tx_delete,
             'fixa':recurring_add,'fixas':recurring_list,'excluir_fixa':recurring_delete}
     for name, handler in routes.items():

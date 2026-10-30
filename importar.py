@@ -38,19 +38,24 @@ def import_financial_data(filepath):
 
     transactions = data.get('transacoes') or (data.get('perfil', {}).get('transacoes') if isinstance(data.get('perfil'), dict) else []) or []
     debts = data.get('contas_a_pagar') or (data.get('perfil', {}).get('contas_a_pagar') if isinstance(data.get('perfil'), dict) else []) or []
+    recurring = data.get('contas_fixas') or (data.get('perfil', {}).get('contas_fixas') if isinstance(data.get('perfil'), dict) else []) or []
+    raw_profile = data.get('perfil') or data.get('metas')
 
-    if not transactions and not debts:
-        print("Aviso: Nenhuma transação ('transacoes') ou conta ('contas_a_pagar') encontrada no JSON.")
-        return
+    if not transactions and not debts and not recurring and not raw_profile:
+        print("Aviso: Nenhum dado ('transacoes', 'contas_a_pagar', 'contas_fixas' ou 'perfil') encontrado no JSON.")
+        return {'transactions': 0, 'debts': 0, 'recurring': 0, 'profile': 0, 'skipped': 0, 'errors': []}
 
     print("=" * 60)
     print(f"Iniciando importação de: {path.name}")
     print(f"Transações encontradas: {len(transactions)}")
     print(f"Contas/Dívidas encontradas: {len(debts)}")
+    if recurring:
+        print(f"Contas fixas encontradas: {len(recurring)}")
     print("=" * 60)
 
     count_tx = 0
     count_debts = 0
+    count_recurring = 0
     errors = []
     skipped = []
 
@@ -126,8 +131,32 @@ def import_financial_data(filepath):
         except Exception as exc:
             errors.append(f"Conta #{idx} ({d}): {exc}")
 
+    # Importar contas fixas mensais (se houver)
+    for idx, r in enumerate(recurring, 1):
+        try:
+            title = str(r.get('titulo', '')).strip()
+            if not title:
+                raise ValueError("Título da conta fixa é obrigatório")
+            amount = db.money_to_cents(r.get('valor') or r.get('valor_total'))
+            day = int(r.get('dia', 15))
+            with db.conn() as c:
+                exists = c.execute('SELECT 1 FROM recurring_bills WHERE title=? AND amount=? AND day=? AND active=1',
+                                   (title[:180], amount, day)).fetchone()
+            if exists:
+                print(f"  [Conta fixa já existe] {title} | {db.brl(amount)} | todo dia {day:02d} (ignorada)")
+                continue
+            rec_id = db.add_recurring(title=title, amount=amount, day=day)
+            count_recurring += 1
+            print(f"  [Fixa #{rec_id}] {title} | {db.brl(amount)} | Todo dia {day:02d}")
+        except Exception as exc:
+            errors.append(f"Conta fixa #{idx} ({r}): {exc}")
+
+    gen_month = data.get('gerar_mes_fixas')
+    if gen_month:
+        generated = db.generate_recurring(str(gen_month))
+        count_debts += len(generated)
+
     # Importar perfil e diretrizes de planejamento (se houver)
-    raw_profile = data.get('perfil') or data.get('metas')
     count_profile = 0
     if isinstance(raw_profile, dict):
         profile = {k: v for k, v in raw_profile.items() if not isinstance(v, (list, dict))}
@@ -142,6 +171,8 @@ def import_financial_data(filepath):
     print("RESUMO DA IMPORTAÇÃO:")
     print(f"✅ Transações importadas com sucesso: {count_tx}")
     print(f"✅ Contas a pagar cadastradas: {count_debts}")
+    if count_recurring:
+        print(f"✅ Contas fixas mensais cadastradas: {count_recurring}")
     if count_profile:
         print(f"✅ Metas e diretrizes de perfil salvas: {count_profile} campos")
     if skipped:
@@ -157,8 +188,11 @@ def import_financial_data(filepath):
     print(f"Mês atual ({s['month']}): Receitas: {db.brl(s['receita'])} | Despesas: {db.brl(s['despesa'])}")
     print(f"Saldo histórico registrado: {db.brl(s['total'])}")
     print("=" * 60)
+    return {'transactions': count_tx, 'debts': count_debts, 'recurring': count_recurring,
+            'profile': count_profile, 'skipped': len(skipped), 'errors': errors}
 
 
 if __name__ == '__main__':
-    target = sys.argv[1] if len(sys.argv) > 1 else 'importar.json'
+    default_file = 'importar.json' if Path('importar.json').is_file() else 'meus_dados.json'
+    target = sys.argv[1] if len(sys.argv) > 1 else default_file
     import_financial_data(target)
