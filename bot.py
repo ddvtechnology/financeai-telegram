@@ -25,6 +25,7 @@ from telegram.ext import (ApplicationBuilder, CallbackQueryHandler,
 import ai
 import battery
 import db
+import quick
 import when
 from config import (BASE, BATTERY_ALERTS, BATTERY_FULL_ALERT, BATTERY_LEVELS, MORNING_HOUR,
                     OWNER_ID, TOKEN, TZ, TZ_NAME)
@@ -624,8 +625,17 @@ async def _chat(update, context):
             await say(update, result_text)
             return
 
-        result = await ai.interpret_message(prompt, previous)
+        try:
+            result = await ai.interpret_message(prompt, previous)
+        except RuntimeError:
+            if previous or not quick.is_record_attempt(prompt):
+                raise
+            result = {'type': 'chat'}
         intent = result.get('type', 'chat')
+        if not previous and intent not in ('transaction', 'debt', 'debt_payment', 'reminder', 'clarify'):
+            fallback = quick.parse(prompt, db.now().date())
+            if fallback:
+                result, intent = fallback, 'transaction'
         if intent == 'transaction':
             await prepare_natural_transaction(update, context, result, prompt, previous)
             return
@@ -654,6 +664,11 @@ async def _chat(update, context):
             return
 
         drafts.pop(user_id, None)
+        if quick.is_record_attempt(prompt):
+            await say(update, '⚠️ Não consegui entender esse lançamento, então NÃO registrei nada. '
+                              'Reenvie com valor e descrição (ex.: “Recebi R$ 831 de complemento de salário”) '
+                              'ou use /receita e /despesa.')
+            return
         result_text = await ai.answer(prompt)
         await say(update, result_text)
     except RuntimeError as exc:
