@@ -484,7 +484,7 @@ def ai_context():
     lines += [f"- #{d['id']} {d['title']}: falta {brl(d['original_amount']-d['paid_amount'])}; vence {short_date(d['due_date'])}" for d in debts] or ['- Nenhuma cadastrada']
     lines.append('')
     lines.append('Últimas movimentações:')
-    lines += [f"- {t['kind']}: {brl(t['amount'])}, {t['category']}, {t['description'][:60]}" for t in tx] or ['- Nenhuma cadastrada']
+    lines += [f"- {short_date(t['occurred_at'])} | {t['kind']}: {brl(t['amount'])}, {t['category']}, {t['description'][:60]}" for t in tx] or ['- Nenhuma cadastrada']
     return '\n'.join(lines)
 
 

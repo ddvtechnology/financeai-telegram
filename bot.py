@@ -376,11 +376,28 @@ async def payment_callback(update, context):
     except ValueError as exc:await q.edit_message_text(f'Não registrado: {exc}')
 
 
-async def history(update, context):
+def asks_history(text):
+    """'últimas despesas/receitas/movimentações' → lista real do banco (com datas), nunca resposta da IA."""
+    plain = normalized(text)
+    m = re.fullmatch(r'(?:quais (?:sao|foram) )?(?:as |os |meus |minhas )*(?:ultimas?|ultimos?|recentes?) (?:\w+ )?'
+                     r'(despesas?|gastos?|receitas?|entradas?|movimentacoes|lancamentos|transacoes)'
+                     r'(?: registrad[oa]s?| recentes?)?(?: com (?:as )?datas?)?', plain)
+    if not m:
+        return None
+    word = m.group(1)
+    if word.startswith(('despesa', 'gasto')):
+        return 'despesa'
+    if word.startswith(('receita', 'entrada')):
+        return 'receita'
+    return 'todas'
+
+
+async def history(update, context, kind=None):
     if not await guard(update):return
-    transactions=db.get_transactions(20)
+    transactions=db.get_transactions(60 if kind else 20)
+    if kind:transactions=[t for t in transactions if t['kind']==kind][:20]
     if not transactions:await say(update,'Não há movimentações registradas.');return
-    lines=['ÚLTIMAS MOVIMENTAÇÕES:']
+    lines=['ÚLTIMAS MOVIMENTAÇÕES:' if not kind else f'ÚLTIMAS {"DESPESAS" if kind=="despesa" else "RECEITAS"}:']
     for t in transactions:
         emoji='➕' if t['kind']=='receita' else '➖'
         lines.append(f'{emoji} #{t["id"]} {db.short_date(t["occurred_at"])} {db.brl(t["amount"])} | {t["category"]} | {t["description"]}\n')
@@ -603,6 +620,10 @@ async def _chat(update, context):
 
     if asks_battery(prompt):
         await battery_cmd(update, context); return
+
+    wanted = asks_history(prompt)
+    if wanted:
+        await history(update, context, None if wanted == 'todas' else wanted); return
 
     user_id = update.effective_user.id
     drafts = context.application.bot_data.setdefault('natural_drafts', {})

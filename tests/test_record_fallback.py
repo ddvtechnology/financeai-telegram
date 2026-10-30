@@ -83,3 +83,30 @@ class NeverFakeConfirmTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class HistoryShortcutTests(unittest.TestCase):
+    def test_detects(self):
+        for q in ('ultimas despesas', 'Últimas despesas registradas', 'quais são as últimas receitas', 'últimos gastos com as datas'):
+            self.assertIsNotNone(bot.asks_history(q), q)
+        self.assertEqual(bot.asks_history('ultimas despesas'), 'despesa')
+        self.assertEqual(bot.asks_history('ultimas receitas'), 'receita')
+        self.assertIsNone(bot.asks_history('gastei 20 nas ultimas despesas do mes'))
+
+    def test_lists_real_dates_without_ai(self):
+        d = tempfile.TemporaryDirectory()
+        old = db.DB_PATH
+        db.DB_PATH = Path(d.name) / 'h.sqlite3'
+        db.init()
+        try:
+            db.insert_transaction('despesa', 2000, 'Transporte', 'Combustível', '2026-10-27')
+            db.insert_transaction('receita', 5000, 'Salário', 'X', '2026-10-28')
+            with mock.patch.object(ai, 'answer', mock.AsyncMock()) as chat:
+                replies = run_chat('últimas despesas')
+            chat.assert_not_called()
+            self.assertIn('27/10/2026', replies[0][0])
+            self.assertNotIn('Salário', replies[0][0])
+            self.assertIn('27/10/2026', db.ai_context())
+        finally:
+            db.DB_PATH = old
+            d.cleanup()
