@@ -35,15 +35,16 @@ def import_financial_data(filepath):
         sys.exit(1)
 
     db.init()
+    if data.get('limpar_antes'):
+        db.reset_all()
 
     transactions = data.get('transacoes') or (data.get('perfil', {}).get('transacoes') if isinstance(data.get('perfil'), dict) else []) or []
     debts = data.get('contas_a_pagar') or (data.get('perfil', {}).get('contas_a_pagar') if isinstance(data.get('perfil'), dict) else []) or []
     recurring = data.get('contas_fixas') or (data.get('perfil', {}).get('contas_fixas') if isinstance(data.get('perfil'), dict) else []) or []
-    raw_profile = data.get('perfil') or data.get('metas')
 
-    if not transactions and not debts and not recurring and not raw_profile:
-        print("Aviso: Nenhum dado ('transacoes', 'contas_a_pagar', 'contas_fixas' ou 'perfil') encontrado no JSON.")
-        return {'transactions': 0, 'debts': 0, 'recurring': 0, 'profile': 0, 'skipped': 0, 'errors': []}
+    if not transactions and not debts and not recurring:
+        print("Aviso: Nenhuma transação ('transacoes'), conta ('contas_a_pagar') ou fixa ('contas_fixas') encontrada no JSON.")
+        return {'tx': 0, 'debts': 0, 'recurring': 0, 'profile': 0, 'errors': []}
 
     print("=" * 60)
     print(f"Iniciando importação de: {path.name}")
@@ -55,7 +56,7 @@ def import_financial_data(filepath):
 
     count_tx = 0
     count_debts = 0
-    count_recurring = 0
+    count_rec = 0
     errors = []
     skipped = []
 
@@ -123,40 +124,51 @@ def import_financial_data(filepath):
 
             debt_id = db.add_debt(amount=amount, due_date=due_date, title=title)
             if paid_amount > 0:
-                with db.conn() as c:
-                    c.execute("UPDATE debts SET paid_amount = ? WHERE id = ?", (paid_amount, debt_id))
+                pay_date = d.get('registrar_pagamento_em')
+                if pay_date:
+                    db.pay_debt(debt_id, paid_amount, occurred_date=str(pay_date))
+                    count_tx += 1
+                else:
+                    with db.conn() as c:
+                        c.execute("UPDATE debts SET paid_amount = ? WHERE id = ?", (paid_amount, debt_id))
 
             count_debts += 1
             print(f"  [Conta #{debt_id}] {title} | Total: {db.brl(amount)} | Vence: {db.short_date(due_date)}")
         except Exception as exc:
             errors.append(f"Conta #{idx} ({d}): {exc}")
 
-    # Importar contas fixas mensais (se houver)
-    for idx, r in enumerate(recurring, 1):
+    # Importar contas fixas mensais / semanais
+    for idx, rec in enumerate(recurring, 1):
         try:
-            title = str(r.get('titulo', '')).strip()
+            title = str(rec.get('titulo', '')).strip()
             if not title:
                 raise ValueError("Título da conta fixa é obrigatório")
-            amount = db.money_to_cents(r.get('valor') or r.get('valor_total'))
-            day = int(r.get('dia', 15))
+            amount = db.money_to_cents(rec.get('valor'))
+            day = rec.get('dia', 0)
+            weekday = rec.get('dia_semana')
+            last_gen = rec.get('ultimo_mes_gerado', False)
             with db.conn() as c:
-                exists = c.execute('SELECT 1 FROM recurring_bills WHERE title=? AND amount=? AND day=? AND active=1',
-                                   (title[:180], amount, day)).fetchone()
+                exists = c.execute(
+                    'SELECT 1 FROM recurring_bills WHERE title=? AND amount=? AND day=? AND COALESCE(weekday,-1)=COALESCE(?,-1)',
+                    (title[:180], amount, int(day or 0), int(weekday) if weekday is not None else None)
+                ).fetchone()
             if exists:
-                print(f"  [Conta fixa já existe] {title} | {db.brl(amount)} | todo dia {day:02d} (ignorada)")
                 continue
-            rec_id = db.add_recurring(title=title, amount=amount, day=day)
-            count_recurring += 1
-            print(f"  [Fixa #{rec_id}] {title} | {db.brl(amount)} | Todo dia {day:02d}")
+            rec_id = db.add_recurring(title, amount, day=int(day or 0), weekday=weekday, last_generated=last_gen)
+            count_rec += 1
+            print(f"  [Fixa #{rec_id}] {title} | {db.brl(amount)}")
         except Exception as exc:
-            errors.append(f"Conta fixa #{idx} ({r}): {exc}")
+            errors.append(f"Conta fixa #{idx} ({rec}): {exc}")
 
-    gen_month = data.get('gerar_mes_fixas')
-    if gen_month:
-        generated = db.generate_recurring(str(gen_month))
-        count_debts += len(generated)
+    for m_str in (data.get('gerar_meses') or []):
+        try:
+            created = db.generate_recurring(str(m_str))
+            count_debts += len(created)
+        except Exception as exc:
+            errors.append(f"Gerar mês {m_str}: {exc}")
 
     # Importar perfil e diretrizes de planejamento (se houver)
+    raw_profile = data.get('perfil') or data.get('metas')
     count_profile = 0
     if isinstance(raw_profile, dict):
         profile = {k: v for k, v in raw_profile.items() if not isinstance(v, (list, dict))}
@@ -171,8 +183,8 @@ def import_financial_data(filepath):
     print("RESUMO DA IMPORTAÇÃO:")
     print(f"✅ Transações importadas com sucesso: {count_tx}")
     print(f"✅ Contas a pagar cadastradas: {count_debts}")
-    if count_recurring:
-        print(f"✅ Contas fixas mensais cadastradas: {count_recurring}")
+    if count_rec:
+        print(f"✅ Contas fixas cadastradas: {count_rec}")
     if count_profile:
         print(f"✅ Metas e diretrizes de perfil salvas: {count_profile} campos")
     if skipped:
@@ -188,11 +200,10 @@ def import_financial_data(filepath):
     print(f"Mês atual ({s['month']}): Receitas: {db.brl(s['receita'])} | Despesas: {db.brl(s['despesa'])}")
     print(f"Saldo histórico registrado: {db.brl(s['total'])}")
     print("=" * 60)
-    return {'transactions': count_tx, 'debts': count_debts, 'recurring': count_recurring,
-            'profile': count_profile, 'skipped': len(skipped), 'errors': errors}
+    return {'tx': count_tx, 'debts': count_debts, 'recurring': count_rec, 'profile': count_profile, 'errors': errors}
 
 
 if __name__ == '__main__':
-    default_file = 'importar.json' if Path('importar.json').is_file() else 'meus_dados.json'
+    default_file = 'importar.json' if Path('importar.json').is_file() else 'dados_iniciais.json'
     target = sys.argv[1] if len(sys.argv) > 1 else default_file
     import_financial_data(target)

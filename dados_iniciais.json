@@ -1,0 +1,184 @@
+{
+  "limpar_antes": true,
+  "transacoes": [
+    {
+      "tipo": "receita",
+      "valor": "1991.19",
+      "categoria": "Serviço",
+      "descricao": "Recebimento de serviço",
+      "data": "2026-10-30"
+    },
+    {
+      "tipo": "receita",
+      "valor": "830.00",
+      "categoria": "Salário",
+      "descricao": "Salário (parcela fim do mês)",
+      "data": "2026-10-30"
+    },
+    {
+      "tipo": "despesa",
+      "valor": "175.00",
+      "categoria": "Cuidados Pessoais",
+      "descricao": "Corte de cabelo (com acréscimo eventual)",
+      "data": "2026-10-30"
+    }
+  ],
+  "contas_fixas": [
+    {
+      "titulo": "Academia",
+      "valor": "100.00",
+      "dia": 4,
+      "ultimo_mes_gerado": "2026-10"
+    },
+    {
+      "titulo": "Aluguel",
+      "valor": "200.00",
+      "dia": 6,
+      "ultimo_mes_gerado": "2026-10"
+    },
+    {
+      "titulo": "Plano celular",
+      "valor": "35.00",
+      "dia": 9,
+      "ultimo_mes_gerado": "2026-10"
+    },
+    {
+      "titulo": "Corte de cabelo",
+      "valor": "140.00",
+      "dia": 30,
+      "ultimo_mes_gerado": "2026-10"
+    },
+    {
+      "titulo": "Combustível",
+      "valor": "80.00",
+      "dia_semana": 0,
+      "ultimo_mes_gerado": "2026-10"
+    }
+  ],
+  "gerar_meses": [
+    "2026-11"
+  ],
+  "contas_a_pagar": [
+    {
+      "titulo": "Roupas - Ads MultiMarcas",
+      "valor_total": "245.00",
+      "valor_pago": "100.00",
+      "registrar_pagamento_em": "2026-10-30",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Perfumes",
+      "valor_total": "542.00",
+      "valor_pago": "100.00",
+      "registrar_pagamento_em": "2026-10-30",
+      "vencimento": "2026-11-30"
+    },
+    {
+      "titulo": "Cartão Joanna - Tablet [1/3]",
+      "valor_total": "164.00",
+      "vencimento": "2026-11-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Tablet [2/3]",
+      "valor_total": "164.00",
+      "vencimento": "2026-12-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Tablet [3/3]",
+      "valor_total": "164.00",
+      "vencimento": "2027-01-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Farmácia [1/2]",
+      "valor_total": "33.00",
+      "vencimento": "2026-11-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Farmácia [2/2]",
+      "valor_total": "33.00",
+      "vencimento": "2026-12-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Joaninha [1/3]",
+      "valor_total": "30.00",
+      "vencimento": "2026-11-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Joaninha [2/3]",
+      "valor_total": "30.00",
+      "vencimento": "2026-12-20"
+    },
+    {
+      "titulo": "Cartão Joanna - Joaninha [3/3]",
+      "valor_total": "30.00",
+      "vencimento": "2027-01-20"
+    },
+    {
+      "titulo": "Empréstimo [2/3]",
+      "valor_total": "81.31",
+      "vencimento": "2026-11-03"
+    },
+    {
+      "titulo": "SParcelado out",
+      "valor_total": "217.22",
+      "vencimento": "2026-11-06"
+    },
+    {
+      "titulo": "Empréstimo [3/3]",
+      "valor_total": "232.43",
+      "vencimento": "2026-11-10"
+    },
+    {
+      "titulo": "Empréstimo [1/3]",
+      "valor_total": "126.32",
+      "vencimento": "2026-11-28"
+    },
+    {
+      "titulo": "Empréstimo [2/3]",
+      "valor_total": "313.08",
+      "vencimento": "2026-12-01"
+    },
+    {
+      "titulo": "Empréstimo [3/3]",
+      "valor_total": "81.32",
+      "vencimento": "2026-12-03"
+    },
+    {
+      "titulo": "SParcelado nov",
+      "valor_total": "206.56",
+      "vencimento": "2026-12-06"
+    },
+    {
+      "titulo": "Empréstimo [2/3]",
+      "valor_total": "126.32",
+      "vencimento": "2026-12-28"
+    },
+    {
+      "titulo": "Empréstimo [3/3]",
+      "valor_total": "313.07",
+      "vencimento": "2027-01-01"
+    },
+    {
+      "titulo": "SParcelado dez",
+      "valor_total": "154.58",
+      "vencimento": "2027-01-06"
+    },
+    {
+      "titulo": "Empréstimo [3/3]",
+      "valor_total": "126.32",
+      "vencimento": "2027-01-28"
+    },
+    {
+      "titulo": "SParcelado jan",
+      "valor_total": "26.68",
+      "vencimento": "2027-02-06"
+    }
+  ],
+  "perfil": {
+    "renda_fixa": "- Até dia 10 de todo mês: R$ 70,00 (Sistema Joaninha baby kids)\n- Dia 15 de todo mês: R$ 935,00 (Salário - 1ª parcela)\n- Último dia do mês (dia 30): R$ 830,00 (Salário - 2ª parcela)\n- Total de renda fixa mensal: R$ 1.835,00",
+    "renda_unica": "- Recebido em 30/10/2026: R$ 1.991,19 (Serviço) e R$ 830,00 (Salário fim do mês)",
+    "previsao_meses": "- Até 10/11/2026: R$ 70,00 (Sistema Joaninha baby kids)\n- 15/11/2026: R$ 935,00 (Salário 1ª parcela)\n- 30/11/2026: R$ 830,00 (Salário 2ª parcela)",
+    "observacoes_planejamento": "Em 30/10/2026 já foram pagos: R$ 175,00 de Corte de cabelo (acréscimo eventual; próximos meses mantém fixo R$ 140,00 todo dia 30), R$ 100,00 de Perfumes (restam R$ 442,00, pago R$ 100/mês no último dia do mês) e R$ 100,00 de Roupas - Ads MultiMarcas (restam R$ 145,00, pago R$ 100/mês no dia 30, podendo aumentar se comprar mais). Cartão Joanna vence todo dia 20 (Tablet 3x R$ 164, Farmácia 2x R$ 33, Joaninha 3x R$ 30). Despesas fixas: Academia R$ 100 (dia 04), Aluguel R$ 200 (dia 06), Plano celular R$ 35 (dia 09), Corte de cabelo R$ 140 (dia 30) e Combustível R$ 80 (toda segunda-feira)."
+  }
+}
+

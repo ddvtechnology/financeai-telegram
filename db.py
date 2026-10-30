@@ -1,4 +1,5 @@
 """Persistência SQLite em centavos, transações ACID e consultas verificáveis."""
+import calendar
 import contextlib
 import re
 import sqlite3
@@ -98,9 +99,10 @@ def init():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
                 amount INTEGER NOT NULL CHECK(amount > 0),
-                day INTEGER NOT NULL CHECK(day BETWEEN 1 AND 28),
+                day INTEGER NOT NULL CHECK(day BETWEEN 0 AND 30),
                 active INTEGER NOT NULL DEFAULT 1,
-                last_generated TEXT
+                last_generated TEXT,
+                weekday INTEGER
             );
             CREATE TABLE IF NOT EXISTS reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +129,23 @@ def init():
                 UNIQUE(debt_id, alert_type)
             );
         ''')
+        row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='recurring_bills'").fetchone()
+        if row and ('BETWEEN 1 AND 28' in row['sql'] or 'weekday' not in row['sql']):
+            c.executescript('''
+                ALTER TABLE recurring_bills RENAME TO _recurring_bills_old;
+                CREATE TABLE recurring_bills (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    amount INTEGER NOT NULL CHECK(amount > 0),
+                    day INTEGER NOT NULL CHECK(day BETWEEN 0 AND 30),
+                    active INTEGER NOT NULL DEFAULT 1,
+                    last_generated TEXT,
+                    weekday INTEGER
+                );
+                INSERT INTO recurring_bills(id, title, amount, day, active, last_generated)
+                    SELECT id, title, amount, day, active, last_generated FROM _recurring_bills_old;
+                DROP TABLE _recurring_bills_old;
+            ''')
 
 
 def _check_date_window(day, years=10):
@@ -163,9 +182,15 @@ def add_debt(amount, due_date, title):
         return cur.lastrowid
 
 
-def pay_debt(debt_id, amount):
+def pay_debt(debt_id, amount, occurred_date=None):
     """Pagamento e despesa ocorrem na MESMA transação, sem dupla contagem."""
     if amount <= 0: raise ValueError('O valor precisa ser positivo.')
+    stamp = now().isoformat()
+    if occurred_date:
+        day = date.fromisoformat(str(occurred_date))
+        _check_date_window(day)
+        current = now()
+        stamp = datetime.combine(day, current.timetz().replace(tzinfo=None), tzinfo=TZ).isoformat()
     with conn() as c:
         c.execute('BEGIN IMMEDIATE')
         d = c.execute('SELECT * FROM debts WHERE id=?', (debt_id,)).fetchone()
@@ -173,7 +198,6 @@ def pay_debt(debt_id, amount):
         pending = d['original_amount'] - d['paid_amount']
         if amount > pending: raise ValueError(f'Valor acima do restante: {brl(pending)}.')
         c.execute('UPDATE debts SET paid_amount=paid_amount+? WHERE id=?', (amount, debt_id))
-        stamp = now().isoformat()
         tx = c.execute('''INSERT INTO transactions(kind,amount,category,description,occurred_at,debt_id)
             VALUES ('despesa',?,?,?,?,?)''', (amount, 'Pagamento de dívida', d['title'], stamp, debt_id)).lastrowid
         c.execute('''INSERT INTO debt_payments(debt_id,transaction_id,amount,paid_at)
@@ -511,6 +535,15 @@ def ai_context():
             lines.append(f"Observações: {profile['observacoes_planejamento']}")
         lines.append('=== FIM DO PERFIL ===')
 
+    recurring = get_recurring()
+    if recurring:
+        w_names = ('segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado', 'domingo')
+        lines.append('')
+        lines.append('Contas fixas cadastradas:')
+        for r in recurring:
+            when_str = f"toda {w_names[r['weekday']]}" if r.get('weekday') is not None else f"todo dia {r['day']:02d}"
+            lines.append(f"- #{r['id']} {r['title']}: {brl(r['amount'])} ({when_str})")
+
     lines.append('')
     lines.append('Dívidas/contas abertas:')
     lines += [f"- #{d['id']} {d['title']}: falta {brl(d['original_amount']-d['paid_amount'])}; vence {short_date(d['due_date'])}" for d in debts] or ['- Nenhuma cadastrada']
@@ -521,30 +554,65 @@ def ai_context():
 
 
 
-def add_recurring(title, amount, day):
-    if amount <= 0 or not title.strip() or not 1 <= int(day) <= 28:
-        raise ValueError('Conta fixa inválida (dia entre 1 e 28).')
-    # Se o dia deste mês já passou, a 1ª conta vem só no próximo mês (não nasce atrasada).
-    last = now().strftime('%Y-%m') if int(day) < now().day else None
+def add_recurring(title, amount, day=0, weekday=None, last_generated=False):
+    if amount <= 0 or not title.strip():
+        raise ValueError('Conta fixa inválida.')
+    if weekday is not None:
+        if not 0 <= int(weekday) <= 6:
+            raise ValueError('Dia da semana inválido (0=segunda a 6=domingo).')
+        day_val = 0
+        wk_val = int(weekday)
+        last = last_generated if isinstance(last_generated, str) else None
+    else:
+        if not 1 <= int(day) <= 30:
+            raise ValueError('Conta fixa inválida (dia entre 1 e 30).')
+        day_val = int(day)
+        wk_val = None
+        if isinstance(last_generated, str):
+            last = last_generated
+        else:
+            # Se o dia deste mês já passou, a 1ª conta vem só no próximo mês (não nasce atrasada).
+            last = now().strftime('%Y-%m') if day_val < now().day else None
     with conn() as c:
-        return c.execute('INSERT INTO recurring_bills(title,amount,day,last_generated) VALUES(?,?,?,?)',
-                         (title.strip()[:180], amount, int(day), last)).lastrowid
+        return c.execute('INSERT INTO recurring_bills(title,amount,day,last_generated,weekday) VALUES(?,?,?,?,?)',
+                         (title.strip()[:180], amount, day_val, last, wk_val)).lastrowid
 
 
 def generate_recurring(month=None):
     """Cria a conta do mês para cada conta fixa ativa. Idempotente: roda quantas vezes quiser."""
     month = month or now().strftime('%Y-%m')
+    year, month_num = (int(x) for x in month.split('-'))
+    max_day = calendar.monthrange(year, month_num)[1]
+    today = now().date()
     created = []
     with conn() as c:
         c.execute('BEGIN IMMEDIATE')
         rows = c.execute('''SELECT * FROM recurring_bills
             WHERE active=1 AND (last_generated IS NULL OR last_generated < ?)''', (month,)).fetchall()
         for r in rows:
-            due = f"{month}-{r['day']:02d}"
-            cur = c.execute('INSERT INTO debts(title,original_amount,due_date,created_at) VALUES(?,?,?,?)',
-                            (r['title'], r['amount'], due, now().isoformat()))
+            if r['weekday'] is not None:
+                for d_num in range(1, max_day + 1):
+                    dt = date(year, month_num, d_num)
+                    if dt.weekday() == r['weekday']:
+                        if r['last_generated'] is None and month == today.strftime('%Y-%m') and dt <= today:
+                            continue
+                        due = dt.isoformat()
+                        exists = c.execute('SELECT 1 FROM debts WHERE title=? AND original_amount=? AND due_date=?',
+                                           (r['title'], r['amount'], due)).fetchone()
+                        if not exists:
+                            cur = c.execute('INSERT INTO debts(title,original_amount,due_date,created_at) VALUES(?,?,?,?)',
+                                            (r['title'], r['amount'], due, now().isoformat()))
+                            created.append(cur.lastrowid)
+            else:
+                actual_day = min(int(r['day']), max_day)
+                due = f"{month}-{actual_day:02d}"
+                exists = c.execute('SELECT 1 FROM debts WHERE title=? AND original_amount=? AND due_date=?',
+                                   (r['title'], r['amount'], due)).fetchone()
+                if not exists:
+                    cur = c.execute('INSERT INTO debts(title,original_amount,due_date,created_at) VALUES(?,?,?,?)',
+                                    (r['title'], r['amount'], due, now().isoformat()))
+                    created.append(cur.lastrowid)
             c.execute('UPDATE recurring_bills SET last_generated=? WHERE id=?', (month, r['id']))
-            created.append(cur.lastrowid)
     return created
 
 

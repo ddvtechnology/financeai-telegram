@@ -226,19 +226,64 @@ class RegressionTests(unittest.TestCase):
             importar.import_financial_data(f)
         self.assertEqual(db.get_debts(open_only=False), [])
 
-    def test_meus_dados_json_imports_cleanly_and_idempotently(self):
-        meus_dados = Path(__file__).resolve().parents[1] / 'meus_dados.json'
+    def test_dados_iniciais_import_and_balances(self):
+        dados_path = Path(__file__).resolve().parent.parent / 'dados_iniciais.json'
         with mock.patch('builtins.print'):
-            stats1 = importar.import_financial_data(meus_dados)
-            stats2 = importar.import_financial_data(meus_dados)
-        self.assertEqual(stats1['errors'], [])
-        self.assertEqual(stats1['recurring'], 5)
-        self.assertEqual(stats1['debts'], 26)  # 21 parcelas + 5 contas fixas de nov/2026
-        self.assertEqual(stats1['profile'], 4)
-        self.assertEqual(stats2['debts'], 0)
-        self.assertEqual(stats2['recurring'], 0)
-        self.assertEqual(len(db.get_debts()), 26)
-        self.assertEqual(len(db.get_recurring()), 5)
+            importar.import_financial_data(dados_path)
+        s = db.summary('2026-10')
+        self.assertEqual(s['receita'], 282119)  # 1991,19 + 830,00
+        self.assertEqual(s['despesa'], 37500)   # 175,00 + 100,00 + 100,00
+        self.assertEqual(s['total'], 244619)    # R$ 2.446,19
+
+        recs = db.get_recurring()
+        self.assertEqual(len(recs), 5)
+        combustivel = next(r for r in recs if 'Combustível' in r['title'])
+        self.assertEqual(combustivel['weekday'], 0)
+
+        debts = db.get_debts()
+        roupas = next(d for d in debts if d['title'] == 'Roupas - Ads MultiMarcas')
+        self.assertEqual(roupas['original_amount'] - roupas['paid_amount'], 14500)
+        perfumes = next(d for d in debts if d['title'] == 'Perfumes')
+        self.assertEqual(perfumes['original_amount'] - perfumes['paid_amount'], 44200)
+        comb_nov = [d for d in debts if d['title'] == 'Combustível']
+        self.assertEqual(len(comb_nov), 5)  # 5 segundas-feiras em nov/2026
+
+    def test_menu_callback_import_initial_flow(self):
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+        msg = SimpleNamespace(reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
+        q = SimpleNamespace(
+            data='mn:import_init',
+            message=msg,
+            answer=mock.AsyncMock(),
+            edit_message_text=mock.AsyncMock(),
+        )
+        upd = SimpleNamespace(
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+            effective_user=SimpleNamespace(id=bot.OWNER_ID),
+            message=None,
+            callback_query=q,
+        )
+        with mock.patch.object(bot, 'OWNER_ID', 1):
+            upd.effective_user.id = 1
+            asyncio.run(bot.menu_callback(upd, ctx))
+            pending = ctx.application.bot_data.get('natural_actions', {})
+            self.assertEqual(len(pending), 1)
+            nonce = next(iter(pending.keys()))
+            q_confirm = SimpleNamespace(
+                data=f'nl:confirm:{nonce}',
+                message=msg,
+                answer=mock.AsyncMock(),
+                edit_message_text=mock.AsyncMock(),
+            )
+            upd_confirm = SimpleNamespace(
+                effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                effective_user=SimpleNamespace(id=1),
+                message=None,
+                callback_query=q_confirm,
+            )
+            with mock.patch('builtins.print'):
+                asyncio.run(bot.natural_action_callback(upd_confirm, ctx))
+            self.assertEqual(db.summary('2026-10')['total'], 244619)
 
 
 if __name__ == '__main__':
