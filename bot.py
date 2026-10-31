@@ -351,14 +351,23 @@ async def debt_add(update, context):
     except ValueError as exc:await say(update,f'Dados inválidos: {exc}')
 
 
-async def debt_list(update, context):
+async def debt_list(update, context, month=None):
     if not await guard(update): return
-    debts = db.get_debts()
-    if not debts:
+    all_debts = db.get_debts()
+    if not all_debts:
         await say(update, '🎉 Parabéns! Nenhuma conta ou dívida em aberto no momento.')
         return
-    total = sum(d['original_amount'] - d['paid_amount'] for d in debts)
-    lines = ['📅 <b>CONTAS E DÍVIDAS EM ABERTO:</b>\n']
+    months = db.get_debt_months()
+    active_month = None if month in (None, 'all') else month
+    debts = db.get_debts(month=active_month) if active_month else all_debts
+    if not debts and active_month:
+        debts = all_debts
+        active_month = None
+
+    total_all = sum(d['original_amount'] - d['paid_amount'] for d in all_debts)
+    total_view = sum(d['original_amount'] - d['paid_amount'] for d in debts)
+    head_label = f'{active_month[5:]}/{active_month[:4]}' if active_month else 'TODAS'
+    lines = [f'📅 <b>CONTAS E DÍVIDAS EM ABERTO ({head_label}):</b>\n']
     for d in debts[:40]:
         rem = d["original_amount"] - d["paid_amount"]
         due_br = db.short_date(d["due_date"])
@@ -366,14 +375,31 @@ async def debt_list(update, context):
         lines.append(f'📌 <b>#{d["id"]} {title}</b>\n   Restante: <code>{html.escape(db.brl(rem))}</code> | 🗓 Vencimento: <code>{due_br}</code>\n')
     if len(debts) > 40:
         lines.append(f'... e mais {len(debts) - 40} contas.\n')
-    lines.append(f'💳 <b>Total geral em aberto:</b> <code>{html.escape(db.brl(total))}</code>')
-    kb = InlineKeyboardMarkup([
+    if active_month:
+        lines.append(f'📆 <b>Subtotal de {head_label}:</b> <code>{html.escape(db.brl(total_view))}</code>')
+    lines.append(f'💳 <b>Total geral em aberto:</b> <code>{html.escape(db.brl(total_all))}</code>')
+
+    filter_row = []
+    for m_str in months[:3]:
+        m_br = f'{m_str[5:]}/{m_str[:4]}'
+        mark = '🔘 ' if active_month == m_str else '📅 '
+        filter_row.append(InlineKeyboardButton(f'{mark}{m_br}', callback_data=f'mn:debts:{m_str}'))
+    if len(months) > 1:
+        mark_all = '🔘 ' if active_month is None else '📋 '
+        filter_row.append(InlineKeyboardButton(f'{mark_all}Todas', callback_data='mn:debts:all'))
+
+    rows_kb = []
+    if filter_row:
+        rows_kb.append(filter_row[:2])
+        if len(filter_row) > 2:
+            rows_kb.append(filter_row[2:])
+    rows_kb.extend([
         [InlineKeyboardButton('💳 Registrar pagamento de conta', callback_data='mn:paylist:0')],
         [InlineKeyboardButton('✏️ Editar data/valor', callback_data='mn:editdebt_list:0'),
          InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
         [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
     ])
-    await say(update, '\n'.join(lines), keyboard=kb, parse_mode='HTML')
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(rows_kb), parse_mode='HTML')
 
 
 async def debt_edit(update, context):
@@ -498,9 +524,9 @@ async def history(update, context, kind=None):
     await say(update, '\n'.join(lines), keyboard=kb)
 
 
-async def report(update, context):
+async def report(update, context, month=None):
     if not await guard(update): return
-    month = context.args[0] if getattr(context, 'args', None) else db.now().strftime('%Y-%m')
+    month = month or (context.args[0] if getattr(context, 'args', None) else db.now().strftime('%Y-%m'))
     try:
         text = month_report_text(month)
     except ValueError as exc:
@@ -508,17 +534,67 @@ async def report(update, context):
         return
 
     month_br = f'{month[5:]}/{month[:4]}'
-    await say(update, text)
+    prev_m = db.previous_month(date.fromisoformat(month + '-01'))
+    next_m = db.next_month(month)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f'⬅️ {prev_m[5:]}/{prev_m[:4]}', callback_data=f'mn:rep:{prev_m}'),
+         InlineKeyboardButton(f'{next_m[5:]}/{next_m[:4]} ➡️', callback_data=f'mn:rep:{next_m}')],
+        [InlineKeyboardButton(f'📄 Baixar Planilha CSV ({month_br})', callback_data=f'mn:repcsv:{month}')],
+    ])
+    await say(update, text, keyboard=kb)
 
     doc = build_csv(month)
     if doc:
         await _msg(update).reply_document(doc, filename=doc.name, caption=f'📄 Extrato detalhado em planilha ({month_br})')
 
 
-async def plan(update, context):
-    if not await guard(update):return
-    p=db.planning()
-    await say(update,f'PLANEJAMENTO SIMPLIFICADO ({p["month"]})\nSaldo histórico registrado: {db.brl(p["balance"])}\nRecebido neste mês: {db.brl(p["income_month"])}\nGasto neste mês: {db.brl(p["spent_month"])}\nDívidas ainda a vencer neste mês: {db.brl(p["due_remaining_month"])}\nDívidas a vencer no próximo mês: {db.brl(p["due_next_month"])}\n\n⚠️ Não prevê receitas futuras nem é saldo bancário. Para aconselhamento detalhado, escreva: Analise meu planejamento e minhas dívidas.')
+async def plan(update, context, month=None):
+    if not await guard(update): return
+    p = db.planning()
+    debt_months = db.get_debt_months()
+    target_m = month or (p['month'] if p['due_remaining_month'] > 0 else (debt_months[0] if debt_months else p['month']))
+    debts_m = db.get_debts(month=target_m)
+    q1_debts = [d for d in debts_m if int(d['due_date'][8:10]) <= 15]
+    q2_debts = [d for d in debts_m if int(d['due_date'][8:10]) > 15]
+
+    def _monthly_flow_amt(d):
+        rem = d['original_amount'] - d['paid_amount']
+        # Perfumes e Roupas são abatidos R$ 100/mês no dia 30
+        if normalized(d['title']) in ('perfumes', 'roupas ads multimarcas') and rem > 10000:
+            return 10000
+        return rem
+
+    q1_total = sum(_monthly_flow_amt(d) for d in q1_debts)
+    q2_total = sum(_monthly_flow_amt(d) for d in q2_debts)
+    flow_total = q1_total + q2_total
+    raw_total = sum(d['original_amount'] - d['paid_amount'] for d in debts_m)
+    m_br = f'{target_m[5:]}/{target_m[:4]}'
+
+    lines = [
+        f'🧭 *PLANEJAMENTO FINANCEIRO ({p["month"]})*\n',
+        f'💰 *Saldo atual em caixa:* `{db.brl(p["balance"])}`',
+        f'🟢 *Recebido em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["income_month"])}`',
+        f'🔴 *Gasto em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["spent_month"])}`',
+        f'📅 *Dívidas ainda a vencer neste mês:* `{db.brl(p["due_remaining_month"])}`',
+        f'📅 *Dívidas a vencer no próximo mês:* `{db.brl(p["due_next_month"])}`\n',
+        f'📊 *Detalhamento de Contas — {m_br}:*',
+        f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(q1_total)}` ({len(q1_debts)} contas)',
+        f'• *2ª Quinzena (dias 16 a 30):* `{db.brl(q2_total)}` ({len(q2_debts)} contas)',
+        f'• *Desembolso previsto no mês ({m_br}):* `{db.brl(flow_total)}`',
+    ]
+    if raw_total != flow_total:
+        lines.append(f'  *(Saldo total das fichas em {m_br}: {db.brl(raw_total)}, considerando R$ 100/mês em Perfumes e Roupas)*')
+    lines.append('\n⚠️ Não prevê receitas futuras nem é saldo bancário.')
+
+    m_buttons = [
+        InlineKeyboardButton(f'{"🔘 " if m == target_m else "📅 "}{m[5:]}/{m[:4]}', callback_data=f'mn:plan:{m}')
+        for m in debt_months[:3]
+    ]
+    kb_rows = []
+    if m_buttons:
+        kb_rows.append(m_buttons)
+    kb_rows.append([InlineKeyboardButton(f'📅 Ver contas de {m_br}', callback_data=f'mn:debts:{target_m}')])
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(kb_rows))
 
 
 async def clock_cmd(update, context):
@@ -715,15 +791,50 @@ async def menu_callback(update, context):
     arg = parts[2] if len(parts) > 2 else None
 
     if cmd == 'debts':
-        await debt_list(update, context)
+        await debt_list(update, context, month=arg)
     elif cmd == 'rec_list':
         await recurring_list(update, context)
     elif cmd == 'rem_list':
         await reminder_list(update, context)
-    elif cmd == 'report':
-        await report(update, context)
+    elif cmd == 'report' or cmd == 'rep':
+        await report(update, context, month=arg)
+    elif cmd == 'repcsv':
+        month = arg or db.now().strftime('%Y-%m')
+        doc = build_csv(month)
+        if doc:
+            await _msg(update).reply_document(doc, filename=doc.name, caption=f'📄 Extrato detalhado ({month[5:]}/{month[:4]})')
+        else:
+            await say(update, f'Não há movimentações registradas em {month[5:]}/{month[:4]} para gerar planilha.')
     elif cmd == 'plan':
-        await plan(update, context)
+        await plan(update, context, month=arg)
+    elif cmd == 'qinc':
+        presets = {
+            'sal15': (93500, 'Salário', 'Salário (1ª parcela dia 15)'),
+            'sal30': (83000, 'Salário', 'Salário (parcela fim do mês)'),
+            'joaninha': (7000, 'Renda Fixa', 'Sistema Joaninha baby kids'),
+        }
+        amount, cat, desc = presets.get(arg, (0, 'Receita', 'Receita'))
+        if amount <= 0:
+            return
+        action = {'type': 'transaction', 'kind': 'receita', 'amount': amount,
+                  'category': cat, 'description': desc, 'occurred_date': None}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Confira antes de registrar:\n\nTipo: Receita\nValor: {db.brl(amount)}\nCategoria: {cat}\nDescrição: {desc}\n\nPosso salvar no seu histórico financeiro?'
+        )
+    elif cmd == 'qexp':
+        presets = {
+            'comb20': (2000, 'Transporte', 'Combustível'),
+        }
+        amount, cat, desc = presets.get(arg, (0, 'Outros', 'Despesa'))
+        if amount <= 0:
+            return
+        action = {'type': 'transaction', 'kind': 'despesa', 'amount': amount,
+                  'category': cat, 'description': desc, 'occurred_date': None}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Confira antes de registrar:\n\nTipo: Despesa\nValor: {db.brl(amount)}\nCategoria: {cat}\nDescrição: {desc}\n\nPosso salvar no seu histórico financeiro?'
+        )
     elif cmd == 'mode':
         await mode_set(update, context)
     elif cmd == 'backup':
@@ -1052,9 +1163,32 @@ async def _chat(update, context):
     if shortcut == normalized('💰 Saldo'):
         await balance(update, context); return
     if shortcut == normalized('➕ Registrar receita'):
-        await say(update, 'Conte normalmente o que recebeu. Exemplo: “Recebi R$ 1.870 de salário”. Vou mostrar a confirmação antes de salvar.'); return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('🟢 Salário Dia 15 (R$ 935,00)', callback_data='mn:qinc:sal15')],
+            [InlineKeyboardButton('🟢 Salário Fim do Mês (R$ 830,00)', callback_data='mn:qinc:sal30')],
+            [InlineKeyboardButton('🟢 Sistema Joaninha (R$ 70,00)', callback_data='mn:qinc:joaninha')],
+        ])
+        await say(
+            update,
+            '🟢 *Registrar Receita*\n\n'
+            'Toque em uma das suas receitas fixas abaixo para registrar com 1 clique, '
+            'ou escreva normalmente no chat (ex.: “Recebi R$ 150 de serviço”):',
+            keyboard=kb
+        )
+        return
     if shortcut == normalized('➖ Registrar despesa'):
-        await say(update, 'Conte normalmente o que gastou. Exemplo: “Gastei R$ 45,90 no almoço”. Vou mostrar a confirmação antes de salvar.'); return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('💳 Pagar uma conta cadastrada', callback_data='mn:paylist:0')],
+            [InlineKeyboardButton('⛽ Combustível avulso (R$ 20,00)', callback_data='mn:qexp:comb20')],
+        ])
+        await say(
+            update,
+            '🔴 *Registrar Despesa ou Pagamento*\n\n'
+            'Se for o pagamento de uma conta já cadastrada, toque em **💳 Pagar uma conta cadastrada** abaixo.\n'
+            'Se for um gasto avulso do dia a dia, escreva normalmente no chat (ex.: “Gastei R$ 45,90 no almoço”):',
+            keyboard=kb
+        )
+        return
     if shortcut == normalized('📅 Contas a pagar'):
         await debt_list(update, context); return
     if shortcut == normalized('📊 Relatório'):

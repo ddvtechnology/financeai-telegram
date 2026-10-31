@@ -186,8 +186,17 @@ def add_debt(amount, due_date, title):
         return cur.lastrowid
 
 
+def _next_month_due(due_iso):
+    """Avança uma data AAAA-MM-DD para o mesmo dia do mês seguinte (ajustando fim do mês)."""
+    dt = date.fromisoformat(str(due_iso)[:10])
+    ny, nm = (dt.year + 1, 1) if dt.month == 12 else (dt.year, dt.month + 1)
+    max_d = calendar.monthrange(ny, nm)[1]
+    return date(ny, nm, min(dt.day, max_d)).isoformat()
+
+
 def pay_debt(debt_id, amount, occurred_date=None):
-    """Pagamento e despesa ocorrem na MESMA transação, sem dupla contagem."""
+    """Pagamento e despesa ocorrem na MESMA transação, sem dupla contagem.
+    Se for pagamento parcial de conta que vence até o mês do pagamento, avança o vencimento para o mês seguinte."""
     if amount <= 0: raise ValueError('O valor precisa ser positivo.')
     stamp = now().isoformat()
     if occurred_date:
@@ -201,20 +210,41 @@ def pay_debt(debt_id, amount, occurred_date=None):
         if not d: raise ValueError('Dívida não encontrada.')
         pending = d['original_amount'] - d['paid_amount']
         if amount > pending: raise ValueError(f'Valor acima do restante: {brl(pending)}.')
-        c.execute('UPDATE debts SET paid_amount=paid_amount+? WHERE id=?', (amount, debt_id))
+        remaining = pending - amount
+        new_due = d['due_date']
+        if remaining > 0 and str(d['due_date'])[:7] <= stamp[:7]:
+            new_due = _next_month_due(d['due_date'])
+            c.execute('DELETE FROM debt_notifications WHERE debt_id=?', (debt_id,))
+        c.execute('UPDATE debts SET paid_amount=paid_amount+?, due_date=? WHERE id=?', (amount, new_due, debt_id))
         tx = c.execute('''INSERT INTO transactions(kind,amount,category,description,occurred_at,debt_id)
             VALUES ('despesa',?,?,?,?,?)''', (amount, 'Pagamento de dívida', d['title'], stamp, debt_id)).lastrowid
         c.execute('''INSERT INTO debt_payments(debt_id,transaction_id,amount,paid_at)
             VALUES (?,?,?,?)''', (debt_id,tx,amount,stamp))
-        return pending - amount
+        return remaining
 
 
-def get_debts(open_only=True):
+def get_debts(open_only=True, month=None):
+    clauses = []
+    params = []
+    if open_only:
+        clauses.append('original_amount > paid_amount')
+    if month:
+        clauses.append('substr(due_date, 1, 7) = ?')
+        params.append(month)
     sql = 'SELECT * FROM debts'
-    if open_only: sql += ' WHERE original_amount > paid_amount'
+    if clauses:
+        sql += ' WHERE ' + ' AND '.join(clauses)
     sql += ' ORDER BY due_date, id'
     with conn() as c:
-        return [dict(r) for r in c.execute(sql)]
+        return [dict(r) for r in c.execute(sql, params)]
+
+
+def get_debt_months():
+    """Lista ordenada de meses (AAAA-MM) que possuem contas em aberto."""
+    with conn() as c:
+        rows = c.execute('''SELECT DISTINCT substr(due_date, 1, 7) AS m FROM debts
+                            WHERE original_amount > paid_amount ORDER BY m''').fetchall()
+    return [r['m'] for r in rows if r['m']]
 
 
 def update_debt(debt_id, new_amount, new_due_date=None, new_title=None):

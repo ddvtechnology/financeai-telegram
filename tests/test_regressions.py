@@ -285,6 +285,32 @@ class RegressionTests(unittest.TestCase):
                 asyncio.run(bot.natural_action_callback(upd_confirm, ctx))
             self.assertEqual(db.summary('2026-10')['total'], 244619)
 
+    def test_partial_payment_advances_due_date_and_month_filters(self):
+        did1 = db.add_debt(44200, '2026-11-30', 'Perfumes')
+        db.add_debt(16400, '2026-12-20', 'Cartão Joanna - Tablet [2/3]')
+        self.assertEqual(db.get_debt_months(), ['2026-11', '2026-12'])
+        self.assertEqual(len(db.get_debts(month='2026-11')), 1)
+        # Pagamento parcial em nov/2026 avança vencimento de 2026-11-30 para 2026-12-30
+        rem = db.pay_debt(did1, 10000, occurred_date='2026-11-30')
+        self.assertEqual(rem, 34200)
+        d_updated = next(d for d in db.get_debts() if d['id'] == did1)
+        self.assertEqual(d_updated['due_date'], '2026-12-30')
+        self.assertEqual(db.get_debt_months(), ['2026-12'])
+
+        # Testa callback de receita rápida (mn:qinc:sal15)
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+        msg = SimpleNamespace(reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
+        q = SimpleNamespace(data='mn:qinc:sal15', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+        upd = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                              effective_user=SimpleNamespace(id=1), message=None, callback_query=q)
+        with mock.patch.object(bot, 'OWNER_ID', 1):
+            asyncio.run(bot.menu_callback(upd, ctx))
+            pending = ctx.application.bot_data.get('natural_actions', {})
+            self.assertEqual(len(pending), 1)
+            act = next(iter(pending.values()))['action']
+            self.assertEqual(act['amount'], 93500)
+            self.assertEqual(act['kind'], 'receita')
+
 
 if __name__ == '__main__':
     unittest.main()
