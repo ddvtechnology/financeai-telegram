@@ -50,7 +50,7 @@
     },
     {
       "titulo": "Combustível",
-      "valor": "80.00",
+      "valor": "20.00",
       "dia_semana": 0,
       "ultimo_mes_gerado": "2026-10"
     }
@@ -178,7 +178,7 @@
     "renda_fixa": "- Até dia 10 de todo mês: R$ 70,00 (Sistema Joaninha baby kids)\n- Dia 15 de todo mês: R$ 935,00 (Salário - 1ª parcela)\n- Último dia do mês (dia 30): R$ 830,00 (Salário - 2ª parcela)\n- Total de renda fixa mensal: R$ 1.835,00",
     "renda_unica": "- Recebido em 30/10/2026: R$ 1.991,19 (Serviço) e R$ 830,00 (Salário fim do mês)",
     "previsao_meses": "- Até 10/11/2026: R$ 70,00 (Sistema Joaninha baby kids)\n- 15/11/2026: R$ 935,00 (Salário 1ª parcela)\n- 30/11/2026: R$ 830,00 (Salário 2ª parcela)",
-    "observacoes_planejamento": "Em 30/10/2026 já foram pagos: R$ 175,00 de Corte de cabelo (acréscimo eventual; próximos meses mantém fixo R$ 140,00 todo dia 30), R$ 100,00 de Perfumes (restam R$ 442,00, pago R$ 100/mês no último dia do mês) e R$ 100,00 de Roupas - Ads MultiMarcas (restam R$ 145,00, pago R$ 100/mês no dia 30, podendo aumentar se comprar mais). Cartão Joanna vence todo dia 20 (Tablet 3x R$ 164, Farmácia 2x R$ 33, Joaninha 3x R$ 30). Despesas fixas: Academia R$ 100 (dia 04), Aluguel R$ 200 (dia 06), Plano celular R$ 35 (dia 09), Corte de cabelo R$ 140 (dia 30) e Combustível R$ 80 (toda segunda-feira)."
+    "observacoes_planejamento": "Em 30/10/2026 já foram pagos: R$ 175,00 de Corte de cabelo (acréscimo eventual; próximos meses mantém fixo R$ 140,00 todo dia 30), R$ 100,00 de Perfumes (restam R$ 442,00, pago R$ 100/mês no último dia do mês) e R$ 100,00 de Roupas - Ads MultiMarcas (restam R$ 145,00, pago R$ 100/mês no dia 30, podendo aumentar se comprar mais). Cartão Joanna vence todo dia 20 (Tablet 3x R$ 164, Farmácia 2x R$ 33, Joaninha 3x R$ 30). Despesas fixas: Academia R$ 100 (dia 04), Aluguel R$ 200 (dia 06), Plano celular R$ 35 (dia 09), Corte de cabelo R$ 140 (dia 30) e Combustível R$ 20 (toda segunda-feira)."
   }
 }
 

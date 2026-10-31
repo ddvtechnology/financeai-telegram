@@ -146,6 +146,10 @@ def init():
                     SELECT id, title, amount, day, active, last_generated FROM _recurring_bills_old;
                 DROP TABLE _recurring_bills_old;
             ''')
+        # Ajuste automático: se Combustível (semanal) estava como R$ 80,00 por segunda, corrige para R$ 20,00 por segunda
+        c.execute("UPDATE recurring_bills SET amount=2000 WHERE title='Combustível' AND amount=8000 AND weekday=0")
+        c.execute("UPDATE debts SET original_amount=2000 WHERE title='Combustível' AND original_amount=8000 AND paid_amount=0")
+        c.execute("UPDATE preferences SET value=REPLACE(value, 'Combustível R$ 80', 'Combustível R$ 20') WHERE key='profile_observacoes_planejamento'")
 
 
 def _check_date_window(day, years=10):
@@ -629,6 +633,21 @@ def remove_recurring(rec_id):
     with conn() as c:
         if c.execute('DELETE FROM recurring_bills WHERE id=?', (rec_id,)).rowcount == 0:
             raise ValueError(f'Conta fixa #{rec_id} não encontrada.')
+
+
+def update_recurring(rec_id, new_amount, update_open_debts=True):
+    if new_amount <= 0:
+        raise ValueError('Valor inválido.')
+    with conn() as c:
+        c.execute('BEGIN IMMEDIATE')
+        r = c.execute('SELECT * FROM recurring_bills WHERE id=?', (rec_id,)).fetchone()
+        if not r:
+            raise ValueError(f'Conta fixa #{rec_id} não encontrada.')
+        c.execute('UPDATE recurring_bills SET amount=? WHERE id=?', (new_amount, rec_id))
+        if update_open_debts:
+            c.execute('UPDATE debts SET original_amount=? WHERE title=? AND paid_amount=0',
+                      (new_amount, r['title']))
+        return dict(r, amount=new_amount)
 
 
 def reset_all():
