@@ -365,19 +365,28 @@ async def debt_list(update, context, month=None):
         active_month = None
 
     total_all = sum(d['original_amount'] - d['paid_amount'] for d in all_debts)
-    total_view = sum(d['original_amount'] - d['paid_amount'] for d in debts)
+    total_month_flow = sum(db.monthly_due_amount(d) for d in debts)
     head_label = f'{active_month[5:]}/{active_month[:4]}' if active_month else 'TODAS'
     lines = [f'📅 <b>CONTAS E DÍVIDAS EM ABERTO ({head_label}):</b>\n']
     for d in debts[:40]:
         rem = d["original_amount"] - d["paid_amount"]
+        m_amt = db.monthly_due_amount(d)
         due_br = db.short_date(d["due_date"])
         title = html.escape(str(d["title"]))
-        lines.append(f'📌 <b>#{d["id"]} {title}</b>\n   Restante: <code>{html.escape(db.brl(rem))}</code> | 🗓 Vencimento: <code>{due_br}</code>\n')
+        if m_amt < rem:
+            lines.append(
+                f'📌 <b>#{d["id"]} {title}</b>\n'
+                f'   No mês: <code>{html.escape(db.brl(m_amt))}</code> <i>(Saldo total: {html.escape(db.brl(rem))})</i> | 🗓 Vencimento: <code>{due_br}</code>\n'
+            )
+        else:
+            lines.append(f'📌 <b>#{d["id"]} {title}</b>\n   Restante: <code>{html.escape(db.brl(rem))}</code> | 🗓 Vencimento: <code>{due_br}</code>\n')
     if len(debts) > 40:
         lines.append(f'... e mais {len(debts) - 40} contas.\n')
     if active_month:
-        lines.append(f'📆 <b>Subtotal de {head_label}:</b> <code>{html.escape(db.brl(total_view))}</code>')
-    lines.append(f'💳 <b>Total geral em aberto:</b> <code>{html.escape(db.brl(total_all))}</code>')
+        lines.append(f'📆 <b>Total a pagar em {head_label}:</b> <code>{html.escape(db.brl(total_month_flow))}</code>')
+    else:
+        lines.append(f'📆 <b>Soma das parcelas atuais:</b> <code>{html.escape(db.brl(total_month_flow))}</code>')
+    lines.append(f'💳 <b>Saldo devedor total (todos os meses):</b> <code>{html.escape(db.brl(total_all))}</code>')
 
     filter_row = []
     for m_str in months[:3]:
@@ -557,17 +566,9 @@ async def plan(update, context, month=None):
     q1_debts = [d for d in debts_m if int(d['due_date'][8:10]) <= 15]
     q2_debts = [d for d in debts_m if int(d['due_date'][8:10]) > 15]
 
-    def _monthly_flow_amt(d):
-        rem = d['original_amount'] - d['paid_amount']
-        # Perfumes e Roupas são abatidos R$ 100/mês no dia 30
-        if normalized(d['title']) in ('perfumes', 'roupas ads multimarcas') and rem > 10000:
-            return 10000
-        return rem
-
-    q1_total = sum(_monthly_flow_amt(d) for d in q1_debts)
-    q2_total = sum(_monthly_flow_amt(d) for d in q2_debts)
+    q1_total = sum(db.monthly_due_amount(d) for d in q1_debts)
+    q2_total = sum(db.monthly_due_amount(d) for d in q2_debts)
     flow_total = q1_total + q2_total
-    raw_total = sum(d['original_amount'] - d['paid_amount'] for d in debts_m)
     m_br = f'{target_m[5:]}/{target_m[:4]}'
 
     # Receitas fixas mensais cadastradas (R$ 70 dia 10 + R$ 935 dia 15 + R$ 830 dia 30 = R$ 1.835,00)
@@ -588,12 +589,10 @@ async def plan(update, context, month=None):
         f'📊 *Detalhamento de Contas — {m_br}:*',
         f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(q1_total)}` ({len(q1_debts)} contas)',
         f'• *2ª Quinzena (dias 16 a 30):* `{db.brl(q2_total)}` ({len(q2_debts)} contas)',
-        f'• *Desembolso previsto no mês ({m_br}):* `{db.brl(flow_total)}`',
+        f'• *Total a pagar no mês ({m_br}):* `{db.brl(flow_total)}`',
+        f'\n✅ *Saldo projetado ao final de {m_br}:* `{db.brl(projected_end)}`'
+        f'\n  *(Caixa atual {db.brl(p["balance"])} + Receitas {db.brl(expected_income_m)} − Contas {db.brl(flow_total)})*',
     ]
-    if raw_total != flow_total:
-        lines.append(f'  *(Saldo total das fichas em {m_br}: {db.brl(raw_total)}, considerando R$ 100/mês em Perfumes e Roupas)*')
-    lines.append(f'\n✅ *Saldo projetado ao final de {m_br}:* `{db.brl(projected_end)}`'
-                 f'\n  *(Caixa atual {db.brl(p["balance"])} + Receitas {db.brl(expected_income_m)} − Contas {db.brl(flow_total)})*')
 
     m_buttons = [
         InlineKeyboardButton(f'{"🔘 " if m == target_m else "📅 "}{m[5:]}/{m[:4]}', callback_data=f'mn:plan:{m}')
@@ -869,10 +868,10 @@ async def menu_callback(update, context):
         chunk = debts[page * per_page:(page + 1) * per_page]
         buttons = []
         for d in chunk:
-            rem = d['original_amount'] - d['paid_amount']
+            m_amt = db.monthly_due_amount(d)
             due_br = db.short_date(d['due_date'])[:5]
             buttons.append([InlineKeyboardButton(
-                f'💳 #{d["id"]} {d["title"][:22]} — {db.brl(rem)} ({due_br})',
+                f'💳 #{d["id"]} {d["title"][:22]} — {db.brl(m_amt)} ({due_br})',
                 callback_data=f'mn:paypick:{d["id"]}'
             )])
         nav = []

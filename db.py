@@ -248,6 +248,15 @@ def get_debt_months():
     return [r['m'] for r in rows if r['m']]
 
 
+def monthly_due_amount(d):
+    """Retorna o valor efetivo a pagar no mês para a conta `d` (R$ 100/mês para Perfumes e Roupas)."""
+    rem = d['original_amount'] - d['paid_amount']
+    norm = re.sub(r'[^a-z0-9]+', ' ', unicodedata.normalize('NFKD', str(d['title']).lower()).encode('ascii', 'ignore').decode('ascii')).strip()
+    if norm in ('perfumes', 'roupas ads multimarcas') and rem > 10000:
+        return 10000
+    return rem
+
+
 def update_debt(debt_id, new_amount, new_due_date=None, new_title=None):
     """Atualiza o valor total ou vencimento de uma conta/dívida existente."""
     if new_amount <= 0:
@@ -353,14 +362,12 @@ def next_month(month):
 def planning():
     current = now().strftime('%Y-%m')
     s = summary(current)
-    # Projeção simples: vencimentos abertos futuros, não inventa receita futura.
     today = now().date().isoformat()
     next_m = next_month(current)
-    with conn() as c:
-        due = c.execute('''SELECT COALESCE(SUM(original_amount-paid_amount),0) FROM debts
-              WHERE due_date>=? AND due_date<? AND original_amount>paid_amount''',(today, next_m+'-01')).fetchone()[0]
-        following = c.execute('''SELECT COALESCE(SUM(original_amount-paid_amount),0) FROM debts
-              WHERE due_date>=? AND due_date<? AND original_amount>paid_amount''',(next_m+'-01',next_month(next_m)+'-01')).fetchone()[0]
+    after_m = next_month(next_m)
+    open_debts = get_debts(open_only=True)
+    due = sum(monthly_due_amount(d) for d in open_debts if today <= d['due_date'] < next_m + '-01')
+    following = sum(monthly_due_amount(d) for d in open_debts if next_m + '-01' <= d['due_date'] < after_m + '-01')
     return {'month':current,'balance':s['total'], 'income_month':s['receita'], 'spent_month':s['despesa'],
             'due_remaining_month':due,'due_next_month':following}
 
@@ -589,9 +596,11 @@ def ai_context():
                 cur_m = m_due
                 lines.append(f"  [Vencimento em {m_due[5:]}/{m_due[:4]}]:")
             rem = d['original_amount'] - d['paid_amount']
-            norm = re.sub(r'[^a-z0-9]+', ' ', unicodedata.normalize('NFKD', d['title'].lower()).encode('ascii', 'ignore').decode('ascii')).strip()
-            note = " (regra: abatimento mensal de R$ 100 todo dia 30, não é o saldo total de uma vez)" if norm in ('perfumes', 'roupas ads multimarcas') else ""
-            lines.append(f"  - #{d['id']} {d['title']}: falta {brl(rem)}; vence {short_date(d['due_date'])}{note}")
+            m_due_amt = monthly_due_amount(d)
+            if m_due_amt < rem:
+                lines.append(f"  - #{d['id']} {d['title']}: a pagar neste mês {brl(m_due_amt)} (saldo total restante: {brl(rem)}); vence {short_date(d['due_date'])}")
+            else:
+                lines.append(f"  - #{d['id']} {d['title']}: falta {brl(rem)}; vence {short_date(d['due_date'])}")
     else:
         lines.append('- Nenhuma cadastrada')
     lines.append('')
