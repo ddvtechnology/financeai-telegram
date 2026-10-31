@@ -570,6 +570,10 @@ async def plan(update, context, month=None):
     raw_total = sum(d['original_amount'] - d['paid_amount'] for d in debts_m)
     m_br = f'{target_m[5:]}/{target_m[:4]}'
 
+    # Receitas fixas mensais cadastradas (R$ 70 dia 10 + R$ 935 dia 15 + R$ 830 dia 30 = R$ 1.835,00)
+    expected_income_m = 183500
+    projected_end = p['balance'] + expected_income_m - flow_total
+
     lines = [
         f'🧭 *PLANEJAMENTO FINANCEIRO ({p["month"]})*\n',
         f'💰 *Saldo atual em caixa:* `{db.brl(p["balance"])}`',
@@ -577,6 +581,10 @@ async def plan(update, context, month=None):
         f'🔴 *Gasto em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["spent_month"])}`',
         f'📅 *Dívidas ainda a vencer neste mês:* `{db.brl(p["due_remaining_month"])}`',
         f'📅 *Dívidas a vencer no próximo mês:* `{db.brl(p["due_next_month"])}`\n',
+        f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`',
+        '  • Até dia 10: `R$ 70,00` (Sistema Joaninha)',
+        '  • Dia 15: `R$ 935,00` (Salário 1ª parcela)',
+        '  • Dia 30: `R$ 830,00` (Salário 2ª parcela)\n',
         f'📊 *Detalhamento de Contas — {m_br}:*',
         f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(q1_total)}` ({len(q1_debts)} contas)',
         f'• *2ª Quinzena (dias 16 a 30):* `{db.brl(q2_total)}` ({len(q2_debts)} contas)',
@@ -584,7 +592,8 @@ async def plan(update, context, month=None):
     ]
     if raw_total != flow_total:
         lines.append(f'  *(Saldo total das fichas em {m_br}: {db.brl(raw_total)}, considerando R$ 100/mês em Perfumes e Roupas)*')
-    lines.append('\n⚠️ Não prevê receitas futuras nem é saldo bancário.')
+    lines.append(f'\n✅ *Saldo projetado ao final de {m_br}:* `{db.brl(projected_end)}`'
+                 f'\n  *(Caixa atual {db.brl(p["balance"])} + Receitas {db.brl(expected_income_m)} − Contas {db.brl(flow_total)})*')
 
     m_buttons = [
         InlineKeyboardButton(f'{"🔘 " if m == target_m else "📅 "}{m[5:]}/{m[:4]}', callback_data=f'mn:plan:{m}')

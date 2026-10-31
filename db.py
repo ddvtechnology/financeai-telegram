@@ -3,6 +3,7 @@ import calendar
 import contextlib
 import re
 import sqlite3
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, date, timedelta
 from config import DB_PATH, TZ
@@ -588,7 +589,7 @@ def ai_context():
                 cur_m = m_due
                 lines.append(f"  [Vencimento em {m_due[5:]}/{m_due[:4]}]:")
             rem = d['original_amount'] - d['paid_amount']
-            norm = unicodedata.normalize('NFKD', d['title'].lower()).encode('ascii', 'ignore').decode('ascii').strip()
+            norm = re.sub(r'[^a-z0-9]+', ' ', unicodedata.normalize('NFKD', d['title'].lower()).encode('ascii', 'ignore').decode('ascii')).strip()
             note = " (regra: abatimento mensal de R$ 100 todo dia 30, não é o saldo total de uma vez)" if norm in ('perfumes', 'roupas ads multimarcas') else ""
             lines.append(f"  - #{d['id']} {d['title']}: falta {brl(rem)}; vence {short_date(d['due_date'])}{note}")
     else:
