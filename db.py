@@ -538,7 +538,7 @@ def morning_data(days=7):
 
 def ai_context():
     s = summary()
-    debts = get_debts()[:20]
+    debts = get_debts(open_only=True)
     tx = get_transactions(15)
     profile = get_profile()
     lines = [
@@ -579,8 +579,20 @@ def ai_context():
             lines.append(f"- #{r['id']} {r['title']}: {brl(r['amount'])} ({when_str})")
 
     lines.append('')
-    lines.append('Dívidas/contas abertas:')
-    lines += [f"- #{d['id']} {d['title']}: falta {brl(d['original_amount']-d['paid_amount'])}; vence {short_date(d['due_date'])}" for d in debts] or ['- Nenhuma cadastrada']
+    lines.append('Dívidas/contas abertas (organizadas por mês de vencimento):')
+    if debts:
+        cur_m = None
+        for d in debts:
+            m_due = d['due_date'][:7]
+            if m_due != cur_m:
+                cur_m = m_due
+                lines.append(f"  [Vencimento em {m_due[5:]}/{m_due[:4]}]:")
+            rem = d['original_amount'] - d['paid_amount']
+            norm = unicodedata.normalize('NFKD', d['title'].lower()).encode('ascii', 'ignore').decode('ascii').strip()
+            note = " (regra: abatimento mensal de R$ 100 todo dia 30, não é o saldo total de uma vez)" if norm in ('perfumes', 'roupas ads multimarcas') else ""
+            lines.append(f"  - #{d['id']} {d['title']}: falta {brl(rem)}; vence {short_date(d['due_date'])}{note}")
+    else:
+        lines.append('- Nenhuma cadastrada')
     lines.append('')
     lines.append('Últimas movimentações:')
     lines += [f"- {short_date(t['occurred_at'])} | {t['kind']}: {brl(t['amount'])}, {t['category']}, {t['description'][:60]}" for t in tx] or ['- Nenhuma cadastrada']
