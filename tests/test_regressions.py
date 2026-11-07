@@ -108,14 +108,16 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(m.call_count, 1)
 
     def test_recurring_bills_are_idempotent_and_monthly(self):
+        m1 = db.next_month(db.now().strftime('%Y-%m'))
+        m2 = db.next_month(m1)
         db.add_recurring('Faculdade', 57000, 10)
         db.add_recurring('Internet', 3500, 5)
-        self.assertEqual(len(db.generate_recurring('2026-11')), 2)
-        self.assertEqual(db.generate_recurring('2026-11'), [])          # não duplica no mesmo mês
-        self.assertEqual(len(db.generate_recurring('2026-12')), 2)      # gera no mês seguinte
+        self.assertEqual(len(db.generate_recurring(m1)), 2)
+        self.assertEqual(db.generate_recurring(m1), [])          # não duplica no mesmo mês
+        self.assertEqual(len(db.generate_recurring(m2)), 2)      # gera no mês seguinte
         titles = {(d['title'], d['due_date']) for d in db.get_debts()}
-        self.assertIn(('Faculdade', '2026-11-10'), titles)
-        self.assertIn(('Internet', '2026-12-05'), titles)
+        self.assertIn(('Faculdade', f'{m1}-10'), titles)
+        self.assertIn(('Internet', f'{m2}-05'), titles)
         with self.assertRaises(ValueError):
             db.add_recurring('X', 100, 31)
 
@@ -310,6 +312,66 @@ class RegressionTests(unittest.TestCase):
             act = next(iter(pending.values()))['action']
             self.assertEqual(act['amount'], 93500)
             self.assertEqual(act['kind'], 'receita')
+
+    def test_perfumes_alert_and_photo_handler_and_guided_buttons(self):
+        did = db.add_debt(44200, db.now().date().isoformat(), 'Perfumes')
+        due_soon = db.get_debts_due_soon()
+        self.assertEqual(len(due_soon), 1)
+        self.assertEqual(due_soon[0]['remaining'], 10000)
+        m_data = db.morning_data()
+        self.assertEqual(m_data['debts'][0]['remaining'], 10000)
+
+        # Botão "✅ Já paguei" (da:pay:<id>) em Perfumes prepara R$ 100,00 (e não R$ 442,00)
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+        msg = SimpleNamespace(text='Alerta', reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
+        q = SimpleNamespace(
+            data=f'da:pay:{did}', message=msg, answer=mock.AsyncMock(),
+            edit_message_text=mock.AsyncMock(), edit_message_reply_markup=mock.AsyncMock()
+        )
+        upd = SimpleNamespace(
+            effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+            effective_user=SimpleNamespace(id=1), message=None, callback_query=q
+        )
+        with mock.patch.object(bot, 'OWNER_ID', 1):
+            asyncio.run(bot.alert_callback(upd, ctx))
+            pending_pay = ctx.application.bot_data.get('pending_payments', {})
+            self.assertEqual(len(pending_pay), 1)
+            nonce, (pay_id, pay_amt, _) = next(iter(pending_pay.items()))
+            self.assertEqual(pay_id, did)
+            self.assertEqual(pay_amt, 10000)
+
+            # Ao confirmar pagamento, exibe botão "💳 Pagar outra conta"
+            q_pay = SimpleNamespace(
+                data=f'pay:{nonce}', message=msg, answer=mock.AsyncMock(),
+                edit_message_text=mock.AsyncMock()
+            )
+            upd_pay = SimpleNamespace(
+                effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                effective_user=SimpleNamespace(id=1), message=None, callback_query=q_pay
+            )
+            asyncio.run(bot.payment_callback(upd_pay, ctx))
+            kwargs = q_pay.edit_message_text.call_args.kwargs
+            self.assertIsNotNone(kwargs.get('reply_markup'))
+
+            # Testa photo_handler com mock do interpret_image
+            fake_file = SimpleNamespace(download_as_bytearray=mock.AsyncMock(return_value=bytearray(b'fake-jpeg')))
+            fake_photo = SimpleNamespace(get_file=mock.AsyncMock(return_value=fake_file))
+            msg_photo = SimpleNamespace(
+                photo=[fake_photo], caption='Comprovante PIX',
+                chat=SimpleNamespace(send_action=mock.AsyncMock()),
+                reply_text=mock.AsyncMock()
+            )
+            upd_photo = SimpleNamespace(
+                effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                effective_user=SimpleNamespace(id=1), message=msg_photo, callback_query=None
+            )
+            fake_vision = {
+                'type': 'transaction', 'kind': 'despesa', 'amount': '35.00',
+                'category': 'Outros', 'description': 'Plano celular', 'occurred_date': None
+            }
+            with mock.patch.object(ai, 'interpret_image', mock.AsyncMock(return_value=fake_vision)):
+                asyncio.run(bot.photo_handler(upd_photo, ctx))
+                self.assertIn('Plano celular', msg_photo.reply_text.call_args.args[0])
 
 
 if __name__ == '__main__':

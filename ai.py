@@ -1,5 +1,6 @@
 """Cliente NVIDIA e interpretação estruturada de mensagens naturais."""
 import asyncio
+import base64
 import json
 import re
 import unicodedata
@@ -7,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from config import AI_TIMEOUT, GEMINI_URL, MODELS, NVIDIA_URL, TZ_NAME
-from db import ai_context, get_mode, get_debts, last_messages, remember, now
+from db import ai_context, get_mode, get_debts, last_messages, monthly_due_amount, remember, now
 
 SYSTEM = '''Você é o FinanceAI, assistente pessoal de finanças prático, ágil e direto no Telegram.
 
@@ -312,6 +313,78 @@ async def interpret_message(prompt, pending=None):
                 raise
     result['_model'] = used
     result['_fallback_note'] = extra
+    return result
+
+
+VISION_SYSTEM = (
+    INTERPRETER_SYSTEM
+    + '\n\nINSTRUÇÕES ADICIONAIS PARA IMAGENS (COMPROVANTES PIX, BOLETOS, FATURAS E CUPONS):\n'
+    '- Analise a imagem enviada (e a legenda do usuário, se houver).\n'
+    '- Se for um comprovante de pagamento já realizado (PIX enviado, comprovante bancário, recibo ou nota fiscal paga):\n'
+    '  • Verifique se o destinatário/descrição ou valor corresponde a uma das contas em `open_debts`. Se corresponder claramente a uma conta aberta, retorne `type: "debt_payment"`, `title` com o nome da conta correspondente em `open_debts`, e `amount` com o valor pago.\n'
+    '  • Caso contrário, retorne `type: "transaction"`, `kind: "despesa"` (ou `"receita"` se for um PIX recebido pelo usuário), `amount`, `category` inferida, `description` curta (ex.: nome do recebedor/estabelecimento) e `occurred_date` (se constar na imagem).\n'
+    '- Se for um boleto a vencer, fatura ou conta para pagar (ainda não paga):\n'
+    '  • Retorne `type: "debt"`, `amount` com o valor do documento, `title` com o nome do beneficiário/conta e `due_date` com a data de vencimento no formato AAAA-MM-DD.\n'
+    '- Responda APENAS com o objeto JSON válido.'
+)
+
+
+def _gemini_vision_call(model_name, api_key, system_text, user_text, image_bytes, mime_type='image/jpeg', max_tokens=1000):
+    if not api_key:
+        raise RuntimeError('Para ler fotos de comprovantes e boletos, configure GEMINI_API_KEY no arquivo .env.')
+    b64_data = base64.b64encode(image_bytes).decode('ascii')
+    body = {
+        'systemInstruction': {'parts': [{'text': system_text}]},
+        'contents': [{
+            'role': 'user',
+            'parts': [
+                {'inline_data': {'mime_type': mime_type, 'data': b64_data}},
+                {'text': user_text},
+            ],
+        }],
+        'generationConfig': {'temperature': 0.1, 'topP': 0.95, 'maxOutputTokens': max_tokens + 1024},
+    }
+    request = urllib.request.Request(
+        GEMINI_URL.format(model=model_name),
+        data=json.dumps(body).encode('utf-8'),
+        headers={'x-goog-api-key': api_key, 'Content-Type': 'application/json'},
+        method='POST',
+    )
+    data = _post_json(request, 'Gemini')
+
+    def extract():
+        cand = data['candidates'][0]
+        text = ''.join(p.get('text', '') for p in cand['content']['parts'] if isinstance(p, dict))
+        return text, cand.get('finishReason') == 'MAX_TOKENS'
+    return _text_result(extract)
+
+
+async def interpret_image(image_bytes, mime_type='image/jpeg', caption=''):
+    """Interpreta foto de comprovante PIX, boleto ou nota fiscal usando o Gemini Vision."""
+    model_name, api_key = MODELS.get('gemini', ('gemini-2.5-flash', ''))
+    open_debts = get_debts()[:30]
+    payload = {
+        'today': now().date().isoformat(),
+        'weekday': WEEKDAYS[now().weekday()],
+        'timezone': str(TZ_NAME),
+        'open_debts': [
+            {
+                'id': d['id'],
+                'title': d['title'],
+                'monthly_due': f"{monthly_due_amount(d) / 100:.2f}",
+                'remaining_amount': f"{(d['original_amount'] - d['paid_amount']) / 100:.2f}",
+                'due_date': d['due_date'],
+            }
+            for d in open_debts
+        ],
+        'user_caption': (caption or '').strip()[:1000],
+    }
+    user_text = json.dumps(payload, ensure_ascii=False)
+    response = await asyncio.to_thread(
+        _gemini_vision_call, model_name, api_key, VISION_SYSTEM, user_text, image_bytes, mime_type
+    )
+    result = _extract_json(response)
+    result['_model'] = 'gemini'
     return result
 
 

@@ -362,11 +362,10 @@ def next_month(month):
 def planning():
     current = now().strftime('%Y-%m')
     s = summary(current)
-    today = now().date().isoformat()
     next_m = next_month(current)
     after_m = next_month(next_m)
     open_debts = get_debts(open_only=True)
-    due = sum(monthly_due_amount(d) for d in open_debts if today <= d['due_date'] < next_m + '-01')
+    due = sum(monthly_due_amount(d) for d in open_debts if d['due_date'] < next_m + '-01')
     following = sum(monthly_due_amount(d) for d in open_debts if next_m + '-01' <= d['due_date'] < after_m + '-01')
     return {'month':current,'balance':s['total'], 'income_month':s['receita'], 'spent_month':s['despesa'],
             'due_remaining_month':due,'due_next_month':following}
@@ -488,7 +487,7 @@ def get_debts_due_soon():
         else:
             continue
         result.append({**d, 'days_left': days_left, 'alert_type': alert_type,
-                        'remaining': d['original_amount'] - d['paid_amount']})
+                        'remaining': monthly_due_amount(d)})
     return result
 
 
@@ -536,7 +535,7 @@ def morning_data(days=7):
     """Dados do resumo diário: saldo do mês, contas até `days` dias (e atrasadas) e lembretes de hoje."""
     today = now().date()
     limit = (today + timedelta(days=days)).isoformat()
-    debts = [dict(d, remaining=d['original_amount'] - d['paid_amount'],
+    debts = [dict(d, remaining=monthly_due_amount(d),
                   days_left=(date.fromisoformat(d['due_date']) - today).days)
              for d in get_debts() if d['due_date'] <= limit]
     reminders = [r for r in get_reminders()

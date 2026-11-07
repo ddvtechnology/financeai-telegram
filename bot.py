@@ -287,7 +287,9 @@ async def recurring_list(update, context):
     if not await guard(update): return
     rows = db.get_recurring()
     if not rows:
-        await say(update, 'Não há contas fixas cadastradas.\nVocê pode dizer, por exemplo: “Cadastrar conta fixa de 100 reais todo dia 4 para Academia”.'); return
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('➕ Nova conta fixa', callback_data='mn:new_rec')]])
+        await say(update, 'Não há contas fixas cadastradas.\nToque no botão abaixo para cadastrar uma nova conta fixa:', keyboard=kb)
+        return
     w_names = ('segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado', 'domingo')
     lines = ['🔁 *CONTAS FIXAS CADASTRADAS:*\n']
     buttons = []
@@ -298,7 +300,8 @@ async def recurring_list(update, context):
             InlineKeyboardButton(f'✏️ Valor #{r["id"]} ({r["title"][:14]})', callback_data=f'mn:recedit:{r["id"]}'),
             InlineKeyboardButton(f'🗑️ Excluir #{r["id"]}', callback_data=f'mn:recdel:{r["id"]}'),
         ])
-    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons) if buttons else None)
+    buttons.append([InlineKeyboardButton('➕ Nova conta fixa', callback_data='mn:new_rec')])
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons))
 
 
 async def recurring_delete(update, context):
@@ -355,7 +358,11 @@ async def debt_list(update, context, month=None):
     if not await guard(update): return
     all_debts = db.get_debts()
     if not all_debts:
-        await say(update, '🎉 Parabéns! Nenhuma conta ou dívida em aberto no momento.')
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton('➕ Nova conta a pagar', callback_data='mn:new_debt')],
+            [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
+        ])
+        await say(update, '🎉 Parabéns! Nenhuma conta ou dívida em aberto no momento.', keyboard=kb)
         return
     months = db.get_debt_months()
     active_month = None if month in (None, 'all') else month
@@ -404,9 +411,10 @@ async def debt_list(update, context, month=None):
             rows_kb.append(filter_row[2:])
     rows_kb.extend([
         [InlineKeyboardButton('💳 Registrar pagamento de conta', callback_data='mn:paylist:0')],
-        [InlineKeyboardButton('✏️ Editar data/valor', callback_data='mn:editdebt_list:0'),
-         InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
-        [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
+        [InlineKeyboardButton('➕ Nova conta a pagar', callback_data='mn:new_debt'),
+         InlineKeyboardButton('✏️ Editar data/valor', callback_data='mn:editdebt_list:0')],
+        [InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0'),
+         InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
     ])
     await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(rows_kb), parse_mode='HTML')
 
@@ -495,7 +503,14 @@ async def payment_callback(update, context):
     try:
         debt_id,amount,_=entry
         remaining=db.pay_debt(debt_id,amount)
-        await q.edit_message_text(f'✅ Pagamento registrado: {db.brl(amount)}\nRestante: {db.brl(remaining)}\nSaldo registrado: {db.brl(db.summary()["total"])}')
+        next_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton('💳 Pagar outra conta', callback_data='mn:paylist:0'),
+            InlineKeyboardButton('📅 Ver contas', callback_data='mn:debts'),
+        ]])
+        await q.edit_message_text(
+            f'✅ Pagamento registrado: {db.brl(amount)}\nRestante: {db.brl(remaining)}\nSaldo registrado: {db.brl(db.summary()["total"])}',
+            reply_markup=next_kb,
+        )
     except ValueError as exc:await q.edit_message_text(f'Não registrado: {exc}')
 
 
@@ -562,7 +577,10 @@ async def plan(update, context, month=None):
     p = db.planning()
     debt_months = db.get_debt_months()
     target_m = month or (p['month'] if p['due_remaining_month'] > 0 else (debt_months[0] if debt_months else p['month']))
-    debts_m = db.get_debts(month=target_m)
+    if target_m == p['month']:
+        debts_m = [d for d in db.get_debts(open_only=True) if d['due_date'][:7] <= target_m]
+    else:
+        debts_m = db.get_debts(month=target_m)
     q1_debts = [d for d in debts_m if int(d['due_date'][8:10]) <= 15]
     q2_debts = [d for d in debts_m if int(d['due_date'][8:10]) > 15]
 
@@ -573,7 +591,25 @@ async def plan(update, context, month=None):
 
     # Receitas fixas mensais cadastradas (R$ 70 dia 10 + R$ 935 dia 15 + R$ 830 dia 30 = R$ 1.835,00)
     expected_income_m = 183500
-    projected_end = p['balance'] + expected_income_m - flow_total
+    received_in_target = db.summary(target_m)['receita'] if target_m <= p['month'] else 0
+    if target_m < p['month']:
+        remaining_income_m = 0
+    elif target_m == p['month']:
+        remaining_income_m = max(0, expected_income_m - received_in_target)
+    else:
+        remaining_income_m = expected_income_m
+
+    projected_end = p['balance'] + remaining_income_m - flow_total
+
+    income_lines = [
+        f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`',
+        '  • Até dia 10: `R$ 70,00` (Sistema Joaninha)',
+        '  • Dia 15: `R$ 935,00` (Salário 1ª parcela)',
+        '  • Dia 30: `R$ 830,00` (Salário 2ª parcela)',
+    ]
+    if target_m == p['month'] and received_in_target > 0:
+        income_lines.append(f'  • *Já recebido em {m_br}:* `{db.brl(received_in_target)}` (já incluso no caixa)')
+        income_lines.append(f'  • *Falta receber em {m_br}:* `{db.brl(remaining_income_m)}`')
 
     lines = [
         f'🧭 *PLANEJAMENTO FINANCEIRO ({p["month"]})*\n',
@@ -582,16 +618,14 @@ async def plan(update, context, month=None):
         f'🔴 *Gasto em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["spent_month"])}`',
         f'📅 *Dívidas ainda a vencer neste mês:* `{db.brl(p["due_remaining_month"])}`',
         f'📅 *Dívidas a vencer no próximo mês:* `{db.brl(p["due_next_month"])}`\n',
-        f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`',
-        '  • Até dia 10: `R$ 70,00` (Sistema Joaninha)',
-        '  • Dia 15: `R$ 935,00` (Salário 1ª parcela)',
-        '  • Dia 30: `R$ 830,00` (Salário 2ª parcela)\n',
+        *income_lines,
+        '',
         f'📊 *Detalhamento de Contas — {m_br}:*',
         f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(q1_total)}` ({len(q1_debts)} contas)',
         f'• *2ª Quinzena (dias 16 a 30):* `{db.brl(q2_total)}` ({len(q2_debts)} contas)',
         f'• *Total a pagar no mês ({m_br}):* `{db.brl(flow_total)}`',
         f'\n✅ *Saldo projetado ao final de {m_br}:* `{db.brl(projected_end)}`'
-        f'\n  *(Caixa atual {db.brl(p["balance"])} + Receitas {db.brl(expected_income_m)} − Contas {db.brl(flow_total)})*',
+        f'\n  *(Caixa atual {db.brl(p["balance"])} + A receber {db.brl(remaining_income_m)} − Contas {db.brl(flow_total)})*',
     ]
 
     m_buttons = [
@@ -648,14 +682,18 @@ async def reminder_add(update, context):
 async def reminder_list(update, context):
     if not await guard(update):return
     rows=db.get_reminders()
-    if not rows:await say(update,'Não há lembretes pendentes.\nVocê pode criar um dizendo, por exemplo: “Me lembra amanhã às 9h de pagar aluguel”.');return
+    if not rows:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('➕ Novo lembrete', callback_data='mn:new_rem')]])
+        await say(update,'Não há lembretes pendentes.\nToque no botão abaixo para criar um lembrete ou diga, por exemplo: “Me lembra amanhã às 9h de pagar aluguel”.', keyboard=kb)
+        return
     lines = ['⏰ *LEMBRETES PENDENTES:*\n']
     buttons = []
     for r in rows:
         due_str = datetime.fromisoformat(r["due_at"]).astimezone(TZ).strftime("%d/%m/%Y %H:%M")
         lines.append(f'• *#{r["id"]}* {due_str} — {r["content"]}')
         buttons.append([InlineKeyboardButton(f'🗑️ Cancelar #{r["id"]} ({r["content"][:22]})', callback_data=f'mn:remdel:{r["id"]}')])
-    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons) if buttons else None)
+    buttons.append([InlineKeyboardButton('➕ Novo lembrete', callback_data='mn:new_rem')])
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons))
 
 
 async def reminder_delete(update, context):
@@ -889,9 +927,15 @@ async def menu_callback(update, context):
             await say(update, 'Conta não encontrada ou já quitada.')
             return
         rem = d['original_amount'] - d['paid_amount']
-        buttons = [[InlineKeyboardButton(f'✅ Pagar total ({db.brl(rem)})', callback_data=f'mn:payamt:{debt_id}:{rem}')]]
-        if rem > 10000:
-            buttons.append([InlineKeyboardButton('💵 Pagar R$ 100,00', callback_data=f'mn:payamt:{debt_id}:10000')])
+        m_amt = db.monthly_due_amount(d)
+        buttons = []
+        if m_amt < rem:
+            buttons.append([InlineKeyboardButton(f'💵 Pagar valor do mês ({db.brl(m_amt)})', callback_data=f'mn:payamt:{debt_id}:{m_amt}')])
+            buttons.append([InlineKeyboardButton(f'✅ Quitar saldo total ({db.brl(rem)})', callback_data=f'mn:payamt:{debt_id}:{rem}')])
+        else:
+            buttons.append([InlineKeyboardButton(f'✅ Pagar total ({db.brl(rem)})', callback_data=f'mn:payamt:{debt_id}:{rem}')])
+            if rem > 10000:
+                buttons.append([InlineKeyboardButton('💵 Pagar R$ 100,00', callback_data=f'mn:payamt:{debt_id}:10000')])
         await say(
             update,
             f'📌 *Conta #{d["id"]}: {d["title"]}*\n'
@@ -1101,6 +1145,45 @@ async def menu_callback(update, context):
             'contas fixas mensais/semanais, faturas Shopee e cartões)?\n\n'
             '⚠️ Isso limpará os dados antigos e deixará seu saldo inicial exatamente em R$ 2.446,19.'
         )
+    elif cmd == 'new_debt':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'new_debt',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '➕ *Nova Conta a Pagar*\n\n'
+            'Digite no chat o **nome**, **valor** e **vencimento** da conta:\n'
+            '• Ex.: `Luz 120,00 28/11/2026`\n'
+            '• Ex.: `Internet 99,90 15/11`\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
+    elif cmd == 'new_rec':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'new_rec',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '➕ *Nova Conta Fixa*\n\n'
+            'Digite no chat o **nome**, **valor** e o **dia do mês (1 a 28)** (ou dia da semana):\n'
+            '• Ex.: `Faculdade 570,00 dia 10`\n'
+            '• Ex.: `Combustível 20,00 toda segunda`\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
+    elif cmd == 'new_rem':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'new_rem',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '➕ *Novo Lembrete*\n\n'
+            'Digite no chat **quando** e **o que** devo lembrar:\n'
+            '• Ex.: `28/11/2026 09:00 Pagar aluguel`\n'
+            '• Ex.: `Amanhã às 14:00 Transferir PIX`\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
 
 
 TYPING_INTERVAL = 4
@@ -1230,9 +1313,102 @@ async def _chat(update, context):
     if edit_state:
         if shortcut in {'cancelar', 'cancela', 'sair', 'parar', 'nao'}:
             edit_states.pop(user_id, None)
-            await say(update, 'Edição cancelada.')
+            await say(update, 'Operação cancelada.')
             return
-        if 'rec_id' in edit_state:
+        mode_state = edit_state.get('mode')
+        if mode_state == 'new_debt':
+            rest = prompt
+            m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', rest)
+            due_iso = None
+            if m_dt:
+                day_s, mon_s, yr_s = m_dt.group(1), m_dt.group(2), m_dt.group(3) or str(db.now().year)
+                try:
+                    due_iso = db.parse_date(f'{int(day_s):02d}/{int(mon_s):02d}/{yr_s}')
+                except ValueError as exc:
+                    await say(update, f'Data inválida: {exc}. Digite no formato DD/MM/AAAA.')
+                    return
+                rest = (rest[:m_dt.start()] + ' ' + rest[m_dt.end():]).strip()
+            amt_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+            if due_iso and amt_tokens:
+                try:
+                    amt_str = amt_tokens[-1]
+                    amount = db.money_to_cents(amt_str)
+                    title = rest.replace(amt_str, '', 1).replace('R$', '').strip(' -–—')
+                    if title:
+                        edit_states.pop(user_id, None)
+                        action = {'type': 'debt', 'amount': amount, 'due_date': due_iso, 'title': title}
+                        await ask_action_confirmation(
+                            update, context, action,
+                            f'Confira a conta antes de salvar:\n\nConta: {title}\nValor: {db.brl(amount)}\nVencimento: {db.short_date(due_iso)}\n\nPosso adicionar à sua lista de contas a pagar?'
+                        )
+                        return
+                except ValueError:
+                    pass
+            edit_states.pop(user_id, None)
+            prompt = f'Tenho uma conta a pagar: {prompt}'
+        elif mode_state == 'new_rec':
+            rest = prompt
+            w_map = {'segunda': 0, 'terca': 1, 'terça': 1, 'quarta': 2, 'quinta': 3, 'sexta': 4, 'sabado': 5, 'sábado': 5, 'domingo': 6}
+            weekday_val = None
+            for w_word, w_idx in w_map.items():
+                if re.search(rf'\b{w_word}(?:-feira)?\b', rest, re.I):
+                    weekday_val = w_idx
+                    rest = re.sub(rf'\b(?:toda\s+)?{w_word}(?:-feira)?\b', ' ', rest, flags=re.I).strip()
+                    break
+            day_val = None
+            if weekday_val is None:
+                m_day = re.search(r'\b(?:todo\s+)?dia\s+(\d{1,2})\b', rest, re.I)
+                if m_day:
+                    day_val = int(m_day.group(1))
+                    rest = (rest[:m_day.start()] + ' ' + rest[m_day.end():]).strip()
+            num_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+            if day_val is None and weekday_val is None and len(num_tokens) >= 2:
+                for tok in reversed(num_tokens):
+                    if re.fullmatch(r'\d{1,2}', tok) and 1 <= int(tok) <= 28:
+                        day_val = int(tok)
+                        rest = re.sub(rf'\b{tok}\b', ' ', rest, count=1).strip()
+                        num_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+                        break
+            if (day_val is not None or weekday_val is not None) and num_tokens:
+                try:
+                    amt_str = num_tokens[-1]
+                    amount = db.money_to_cents(amt_str)
+                    title = rest.replace(amt_str, '', 1).replace('R$', '').strip(' -–—')
+                    if title:
+                        edit_states.pop(user_id, None)
+                        w_names = ('segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado', 'domingo')
+                        when_desc = f'toda {w_names[weekday_val]}' if weekday_val is not None else f'todo dia {day_val:02d}'
+                        action = {'type': 'recurring_add', 'title': title, 'amount': amount, 'day': day_val or 1, 'weekday': weekday_val}
+                        await ask_action_confirmation(
+                            update, context, action,
+                            f'Cadastrar nova conta fixa?\n\nConta: {title}\nValor: {db.brl(amount)}\nFrequência: {when_desc}'
+                        )
+                        return
+                except ValueError as exc:
+                    await say(update, f'Dados inválidos: {exc}')
+                    return
+            await say(update, 'Informe o nome, valor e o dia (1 a 28) ou dia da semana. Exemplo: `Faculdade 570,00 dia 10`')
+            return
+        elif mode_state == 'new_rem':
+            edit_states.pop(user_id, None)
+            m_rem = re.match(r'^(\d{2}/\d{2}/\d{4})\s+(\d{2}:\d{2})\s+(.+)$', prompt.strip(), re.S)
+            if m_rem:
+                try:
+                    dt = datetime.strptime(m_rem.group(1) + ' ' + m_rem.group(2), '%d/%m/%Y %H:%M').replace(tzinfo=TZ)
+                    if dt <= db.now():
+                        await say(update, 'Informe data e hora futuras.')
+                        return
+                    action = {'type': 'reminder', 'due_at': dt.isoformat(), 'content': m_rem.group(3).strip()}
+                    await ask_action_confirmation(
+                        update, context, action,
+                        f'Confira o lembrete:\n\nLembrar: {m_rem.group(3).strip()}\nQuando: {m_rem.group(1)} às {m_rem.group(2)}\n\nPosso salvar esse lembrete?'
+                    )
+                    return
+                except ValueError as exc:
+                    await say(update, f'Data inválida: {exc}')
+                    return
+            prompt = f'Me lembra: {prompt}'
+        elif 'rec_id' in edit_state:
             try:
                 tokens = [t for t in prompt.split() if re.search(r'\d', t)]
                 new_amt = db.money_to_cents(tokens[-1] if tokens else prompt)
@@ -1471,9 +1647,12 @@ async def prepare_natural_debt_payment(update, context, result, prompt, previous
 
     debt = matches[0]
     remaining = debt['original_amount'] - debt['paid_amount']
+    monthly_due = db.monthly_due_amount(debt)
     amount_raw = result.get('amount')
     if result.get('full_payment') is True and amount_raw in (None, ''):
-        amount = remaining
+        amount = monthly_due if (monthly_due < remaining and 'quit' not in normalized(prompt)) else remaining
+    elif amount_raw in (None, '') and monthly_due < remaining:
+        amount = monthly_due
     elif amount_raw in (None, ''):
         await store_clarification(update, context, prompt, result,
             f'Quanto você pagou da conta “{debt["title"]}”? Ainda faltam {db.brl(remaining)}.', previous)
@@ -1620,10 +1799,21 @@ async def natural_action_callback(update, context):
                 f'Vencimento: {db.short_date(action["due_date"])}')
         elif action_type == 'debt_payment':
             remaining = db.pay_debt(int(action['debt_id']), int(action['amount']))
+            next_kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton('💳 Pagar outra conta', callback_data='mn:paylist:0'),
+                InlineKeyboardButton('📅 Ver contas', callback_data='mn:debts'),
+            ]])
             await query.edit_message_text(
                 f'✅ Pagamento registrado para “{action["title"]}”: {db.brl(action["amount"])}.\n'
                 f'Restante: {db.brl(remaining)}\nSaldo histórico registrado: {db.brl(db.summary()["total"])}\n'
-                'Isso é apenas um registro no FinanceAI; não houve transferência bancária.')
+                'Isso é apenas um registro no FinanceAI; não houve transferência bancária.',
+                reply_markup=next_kb)
+        elif action_type == 'recurring_add':
+            rid = db.add_recurring(action['title'], int(action['amount']), int(action.get('day') or 1), weekday=action.get('weekday'))
+            created = db.generate_recurring()
+            extra = '\nJá gerei as contas correspondentes na sua lista!' if created else ''
+            await query.edit_message_text(
+                f'✅ Conta fixa #{rid} cadastrada: {action["title"]} ({db.brl(action["amount"])}).{extra}')
         elif action_type == 'tx_delete':
             db.delete_transaction(int(action['tx_id']))
             await query.edit_message_text(
@@ -1820,16 +2010,20 @@ async def alert_callback(update, context):
         db.insert_reminder(due.isoformat(), f'Pagar {debt["title"]}')
         await q.edit_message_text(f'{original}\n\n⏰ Vou lembrar de novo às {due.strftime("%H:%M")}.')
     elif action == 'pay':
-        remaining = debt['original_amount'] - debt['paid_amount']
+        full_rem = debt['original_amount'] - debt['paid_amount']
+        remaining = db.monthly_due_amount(debt)
         nonce = secrets.token_hex(8)
         context.application.bot_data.setdefault('pending_payments', {})[nonce] = (num, remaining, now.timestamp())
         keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton('✅ Confirmar registro', callback_data='pay:' + nonce),
             InlineKeyboardButton('Cancelar', callback_data='cancel:' + nonce)]])
         await q.edit_message_reply_markup(None)
-        await q.message.reply_text(
-            f'Registrar o pagamento TOTAL de {db.brl(remaining)} da conta “{debt["title"]}”?\nNão transfere dinheiro de verdade.',
-            reply_markup=keyboard)
+        if remaining < full_rem:
+            msg_pay = (f'Registrar o pagamento mensal de {db.brl(remaining)} '
+                       f'(saldo total: {db.brl(full_rem)}) da conta “{debt["title"]}”?\nNão transfere dinheiro de verdade.')
+        else:
+            msg_pay = f'Registrar o pagamento TOTAL de {db.brl(remaining)} da conta “{debt["title"]}”?\nNão transfere dinheiro de verdade.'
+        await q.message.reply_text(msg_pay, reply_markup=keyboard)
 
 
 POLL_SECONDS = 15
@@ -1950,6 +2144,45 @@ async def on_stop(app):
         await asyncio.gather(task,return_exceptions=True)
 
 
+async def photo_handler(update, context):
+    """Lê fotos de comprovantes PIX, boletos e notas fiscais usando Gemini Vision."""
+    if not await guard(update):
+        return
+    if not update.message or not update.message.photo:
+        return
+    waiter = Waiting(update)
+    waiter.start()
+    try:
+        photo = update.message.photo[-1]
+        tg_file = await photo.get_file()
+        image_bytes = bytes(await tg_file.download_as_bytearray())
+        caption = (update.message.caption or '').strip()
+        result = await ai.interpret_image(image_bytes, mime_type='image/jpeg', caption=caption)
+        intent = result.get('type', 'transaction')
+        prompt_ref = caption or 'Comprovante/boleto em imagem'
+        if intent == 'debt_payment':
+            await prepare_natural_debt_payment(update, context, result, prompt_ref)
+            return
+        if intent == 'debt':
+            await prepare_natural_debt(update, context, result, prompt_ref)
+            return
+        if intent == 'transaction':
+            await prepare_natural_transaction(update, context, result, prompt_ref)
+            return
+        await say(
+            update,
+            '📷 Recebi a imagem, mas não consegui identificar claramente o valor ou o tipo de comprovante/boleto.\n'
+            'Reenvie a foto com uma legenda curta (ex.: “Paguei conta de luz” ou “Boleto internet”) ou digite o valor no chat.'
+        )
+    except RuntimeError as exc:
+        await say(update, f'📷 Não consegui ler a imagem: {exc}')
+    except Exception:
+        log.exception('Erro inesperado ao processar foto')
+        await say(update, 'Ocorreu um erro ao analisar a imagem. Tente novamente ou digite o lançamento no chat.')
+    finally:
+        await waiter.stop()
+
+
 def main():
     global LOCK
     if not TOKEN:raise SystemExit('Configure TELEGRAM_BOT_TOKEN no arquivo .env.')
@@ -1989,6 +2222,7 @@ def main():
     app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado|gemini)$'))
     app.add_handler(CallbackQueryHandler(menu_callback,pattern='^mn:'))
     # block=False: enquanto a IA pensa, botões e comandos continuam funcionando
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler, block=False))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat,block=False))
     log.info('Iniciando o bot em long polling...')
     app.run_polling(drop_pending_updates=False)
