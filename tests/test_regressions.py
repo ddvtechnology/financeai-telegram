@@ -434,6 +434,13 @@ class RegressionTests(unittest.TestCase):
             self.assertIn('Tênis [1/2]', titles)
             self.assertIn('Tênis [2/2]', titles)
 
+            # 7. Verifica que cada mês no planejamento desconta apenas sua própria parcela (R$ 50,00)
+            cp_nov = db.cumulative_planning('2026-11')
+            self.assertEqual(cp_nov['flow_total'], 5000)
+            cp_dec = db.cumulative_planning('2026-12')
+            self.assertEqual(cp_dec['registered_total'], 5000)
+            self.assertEqual(cp_dec['opening_balance'], cp_nov['closing_balance'])
+
 
 if __name__ == '__main__':
     unittest.main()

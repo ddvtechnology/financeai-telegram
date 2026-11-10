@@ -366,7 +366,13 @@ async def debt_list(update, context, month=None):
         await say(update, '🎉 Parabéns! Nenhuma conta ou dívida em aberto no momento.', keyboard=kb)
         return
     months = db.get_debt_months()
-    active_month = None if month in (None, 'all') else month
+    cur_m = db.now().strftime('%Y-%m')
+    if month is None:
+        active_month = cur_m if cur_m in months else (months[0] if months else None)
+    elif month == 'all':
+        active_month = None
+    else:
+        active_month = month
     debts = db.get_debts(month=active_month) if active_month else all_debts
     if not debts and active_month:
         debts = all_debts
@@ -374,9 +380,14 @@ async def debt_list(update, context, month=None):
 
     total_all = sum(d['original_amount'] - d['paid_amount'] for d in all_debts)
     total_month_flow = sum(db.monthly_due_amount(d) for d in debts)
-    head_label = f'{active_month[5:]}/{active_month[:4]}' if active_month else 'TODAS'
+    head_label = f'{active_month[5:]}/{active_month[:4]}' if active_month else 'TODAS OS MESES'
     lines = [f'📅 <b>CONTAS E DÍVIDAS EM ABERTO ({head_label}):</b>\n']
+    last_m_hdr = None
     for d in debts[:40]:
+        d_m = d['due_date'][:7]
+        if active_month is None and d_m != last_m_hdr:
+            last_m_hdr = d_m
+            lines.append(f'🗓 <b>── Mês {d_m[5:]}/{d_m[:4]} ──</b>')
         rem = d["original_amount"] - d["paid_amount"]
         m_amt = db.monthly_due_amount(d)
         due_br = db.short_date(d["due_date"])
@@ -393,7 +404,7 @@ async def debt_list(update, context, month=None):
     if active_month:
         lines.append(f'📆 <b>Total a pagar em {head_label}:</b> <code>{html.escape(db.brl(total_month_flow))}</code>')
     else:
-        lines.append(f'📆 <b>Soma das parcelas atuais:</b> <code>{html.escape(db.brl(total_month_flow))}</code>')
+        lines.append(f'📆 <b>Soma das parcelas listadas:</b> <code>{html.escape(db.brl(total_month_flow))}</code>')
     lines.append(f'💳 <b>Saldo devedor total (todos os meses):</b> <code>{html.escape(db.brl(total_all))}</code>')
 
     filter_row = []
@@ -579,55 +590,53 @@ async def plan(update, context, month=None):
     p = db.planning()
     debt_months = db.get_debt_months()
     target_m = month or (p['month'] if p['due_remaining_month'] > 0 else (debt_months[0] if debt_months else p['month']))
-    if target_m == p['month']:
-        debts_m = [d for d in db.get_debts(open_only=True) if d['due_date'][:7] <= target_m]
-    else:
-        debts_m = db.get_debts(month=target_m)
-    q1_debts = [d for d in debts_m if int(d['due_date'][8:10]) <= 15]
-    q2_debts = [d for d in debts_m if int(d['due_date'][8:10]) > 15]
-
-    q1_total = sum(db.monthly_due_amount(d) for d in q1_debts)
-    q2_total = sum(db.monthly_due_amount(d) for d in q2_debts)
-    flow_total = q1_total + q2_total
+    cp = db.cumulative_planning(target_m)
     m_br = f'{target_m[5:]}/{target_m[:4]}'
+    inc = cp['income_info']
+    expected_income_m = inc['expected']
+    remaining_income_m = inc['remaining_fixed']
+    received_fixed_m = inc['received_fixed']
 
-    # Receitas fixas mensais cadastradas (R$ 70 dia 10 + R$ 935 dia 15 + R$ 830 dia 30 = R$ 1.835,00)
-    expected_income_m = 183500
-    received_in_target = db.summary(target_m)['receita'] if target_m <= p['month'] else 0
-    if target_m < p['month']:
-        remaining_income_m = 0
-    elif target_m == p['month']:
-        remaining_income_m = max(0, expected_income_m - received_in_target)
-    else:
-        remaining_income_m = expected_income_m
-
-    projected_end = p['balance'] + remaining_income_m - flow_total
+    j_tag = ' ✅ *(já recebido)*' if inc['joaninha_ok'] and target_m == p['month'] else ''
+    s15_tag = ' ✅ *(já recebido)*' if inc['sal15_ok'] and target_m == p['month'] else ''
+    s30_tag = ' ✅ *(já recebido)*' if inc['sal30_ok'] and target_m == p['month'] else ''
 
     income_lines = [
         f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`',
-        '  • Até dia 10: `R$ 70,00` (Sistema Joaninha)',
-        '  • Dia 15: `R$ 935,00` (Salário 1ª parcela)',
-        '  • Dia 30: `R$ 830,00` (Salário 2ª parcela)',
+        f'  • Até dia 10: `R$ 70,00` (Sistema Joaninha){j_tag}',
+        f'  • Dia 15: `R$ 935,00` (Salário 1ª parcela){s15_tag}',
+        f'  • Dia 30: `R$ 830,00` (Salário 2ª parcela){s30_tag}',
     ]
-    if target_m == p['month'] and received_in_target > 0:
-        income_lines.append(f'  • *Já recebido em {m_br}:* `{db.brl(received_in_target)}` (já incluso no caixa)')
-        income_lines.append(f'  • *Falta receber em {m_br}:* `{db.brl(remaining_income_m)}`')
+    if target_m == p['month'] and received_fixed_m > 0:
+        income_lines.append(f'  • *Já recebido das fixas em {m_br}:* `{db.brl(received_fixed_m)}` (já no caixa)')
+        income_lines.append(f'  • *Falta entrar em {m_br}:* `{db.brl(remaining_income_m)}`')
+
+    opening_label = (
+        f'💰 *Saldo inicial projetado em {m_br} (vindo do mês anterior):* `{db.brl(cp["opening_balance"])}`'
+        if target_m > cp['start_m']
+        else f'💰 *Saldo atual disponível em caixa:* `{db.brl(cp["opening_balance"])}`'
+    )
+
+    detail_lines = [
+        f'📊 *Detalhamento de Contas — {m_br}:*',
+        f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(cp["q1_total"])}` ({len(cp["q1_items"])} contas)',
+        f'• *2ª Quinzena (dias 16 a 31):* `{db.brl(cp["q2_total"])}` ({len(cp["q2_items"])} contas)',
+    ]
+    if cp['projected_fixed_total'] > 0:
+        detail_lines.append(f'  ↳ *Parcelas já lançadas em {m_br}:* `{db.brl(cp["registered_total"])}`')
+        detail_lines.append(f'  ↳ *Contas fixas + Perfumes/Roupas do mês:* `{db.brl(cp["projected_fixed_total"])}`')
+    detail_lines.append(f'• *Total a pagar no mês ({m_br}):* `{db.brl(cp["flow_total"])}`')
 
     lines = [
-        f'🧭 *PLANEJAMENTO FINANCEIRO ({p["month"]})*\n',
-        f'💰 *Saldo atual em caixa:* `{db.brl(p["balance"])}`',
-        f'🟢 *Recebido em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["income_month"])}`',
-        f'🔴 *Gasto em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["spent_month"])}`',
-        f'📅 *Dívidas ainda a vencer neste mês:* `{db.brl(p["due_remaining_month"])}`',
-        f'📅 *Dívidas a vencer no próximo mês:* `{db.brl(p["due_next_month"])}`\n',
+        f'🧭 *PLANEJAMENTO FINANCEIRO ({m_br})*\n',
+        f'💰 *Caixa real de hoje:* `{db.brl(p["balance"])}`',
+        f'🟢 *Recebido em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["income_month"])}` | 🔴 *Gasto:* `{db.brl(p["spent_month"])}`\n',
+        opening_label,
         *income_lines,
         '',
-        f'📊 *Detalhamento de Contas — {m_br}:*',
-        f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(q1_total)}` ({len(q1_debts)} contas)',
-        f'• *2ª Quinzena (dias 16 a 30):* `{db.brl(q2_total)}` ({len(q2_debts)} contas)',
-        f'• *Total a pagar no mês ({m_br}):* `{db.brl(flow_total)}`',
-        f'\n✅ *Saldo projetado ao final de {m_br}:* `{db.brl(projected_end)}`'
-        f'\n  *(Caixa atual {db.brl(p["balance"])} + A receber {db.brl(remaining_income_m)} − Contas {db.brl(flow_total)})*',
+        *detail_lines,
+        f'\n✅ *Saldo livre projetado ao final de {m_br}:* `{db.brl(cp["closing_balance"])}`'
+        f'\n  *({db.brl(cp["opening_balance"])} inicial + {db.brl(remaining_income_m)} a receber − {db.brl(cp["flow_total"])} contas)*',
     ]
 
     m_buttons = [
@@ -1497,7 +1506,17 @@ async def _chat(update, context):
                 lines_preview.append(f'• {part_title}: `{db.brl(part_amount)}` — 🗓 `{db.short_date(cur_due)}`')
                 cur_due = db._next_month_due(cur_due)
 
-            lines_preview.append('\nPosso cadastrar todas essas parcelas na sua lista de contas a pagar?')
+            first_m = first_due[:7]
+            cp_before = db.cumulative_planning(first_m)
+            first_part_amt = installments[0]['amount']
+            after_balance = cp_before['closing_balance'] - first_part_amt
+            lines_preview.append(
+                f'\n🧭 *Impacto no Planejamento de {first_m[5:]}/{first_m[:4]}:*\n'
+                f'• Sobra projetada antes: `{db.brl(cp_before["closing_balance"])}`\n'
+                f'• Sobra projetada após 1ª parcela: `{db.brl(after_balance)}`\n'
+                '*(Cada mês descontará apenas a sua respectiva parcela)*\n'
+                '\nPosso cadastrar todas essas parcelas na sua lista de contas a pagar?'
+            )
             action = {'type': 'debt_installments', 'title': title, 'installments': installments}
             await ask_action_confirmation(update, context, action, '\n'.join(lines_preview))
             return

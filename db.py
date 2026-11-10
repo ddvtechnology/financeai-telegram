@@ -359,6 +359,190 @@ def next_month(month):
     return (date(d.year+1, 1, 1) if d.month == 12 else date(d.year, d.month+1,1)).strftime('%Y-%m')
 
 
+def fixed_income_status(month):
+    """Verifica quais das 3 receitas fixas mensais (R$ 70 + R$ 935 + R$ 830 = R$ 1.835,00)
+    já entraram em `month` e quanto ainda falta receber (sem abater receitas extras avulsas)."""
+    expected = 183500
+    current = now().strftime('%Y-%m')
+    if month < current:
+        return {'expected': expected, 'received_fixed': expected, 'remaining_fixed': 0,
+                'joaninha_ok': True, 'sal15_ok': True, 'sal30_ok': True}
+    if month > current:
+        return {'expected': expected, 'received_fixed': 0, 'remaining_fixed': expected,
+                'joaninha_ok': False, 'sal15_ok': False, 'sal30_ok': False}
+
+    txs = [t for t in month_transactions(month) if t['kind'] == 'receita']
+    joaninha_ok = False
+    sal15_ok = False
+    sal30_ok = False
+    for t in txs:
+        text_norm = unicodedata.normalize('NFKD', f"{t['category']} {t['description']}".lower()).encode('ascii', 'ignore').decode('ascii')
+        amt = int(t['amount'])
+        if not joaninha_ok and ('joaninha' in text_norm or amt == 7000):
+            joaninha_ok = True
+            continue
+        if not sal15_ok and (amt == 93500 or ('sal' in text_norm and ('15' in text_norm or '1' in text_norm or 88000 <= amt <= 100000))):
+            sal15_ok = True
+            continue
+        if not sal30_ok and (amt == 83000 or ('sal' in text_norm and ('30' in text_norm or 'fim' in text_norm or 'complemento' in text_norm or 75000 <= amt <= 87999))):
+            sal30_ok = True
+            continue
+
+    received_fixed = (7000 if joaninha_ok else 0) + (93500 if sal15_ok else 0) + (83000 if sal30_ok else 0)
+    return {
+        'expected': expected,
+        'received_fixed': received_fixed,
+        'remaining_fixed': max(0, expected - received_fixed),
+        'joaninha_ok': joaninha_ok,
+        'sal15_ok': sal15_ok,
+        'sal30_ok': sal30_ok,
+    }
+
+
+def _months_diff(m_start, m_end):
+    y1, m1 = (int(x) for x in m_start.split('-'))
+    y2, m2 = (int(x) for x in m_end.split('-'))
+    return (y2 - y1) * 12 + (m2 - m1)
+
+
+def project_month_debts(target_m):
+    """Retorna todas as contas previstas para `target_m`:
+    - Parcelas/contas já cadastradas em `debts` para `target_m` (projected=False)
+    - Se `target_m` for mês futuro onde as contas fixas (`recurring_bills`) e os saldos
+      rolantes de R$ 100/mês (`Perfumes` e `Roupas`) ainda não foram gerados/avançados,
+      inclui sua projeção exata (projected=True) para não subestimar os gastos dos meses seguintes."""
+    current = now().strftime('%Y-%m')
+    open_debts = get_debts(open_only=True)
+    debt_months = get_debt_months()
+    first_active_m = current if any(d['due_date'][:7] <= current for d in open_debts) else (debt_months[0] if debt_months else current)
+
+    if target_m == current:
+        actual = [d for d in open_debts if d['due_date'][:7] <= target_m]
+    else:
+        actual = [d for d in open_debts if d['due_date'][:7] == target_m]
+
+    items = []
+    for d in actual:
+        items.append({
+            'id': d['id'],
+            'title': d['title'],
+            'due_date': d['due_date'],
+            'monthly_due': monthly_due_amount(d),
+            'remaining': d['original_amount'] - d['paid_amount'],
+            'projected': False,
+        })
+
+    if target_m > first_active_m:
+        year, month_num = (int(x) for x in target_m.split('-'))
+        max_day = calendar.monthrange(year, month_num)[1]
+        # 1) Contas fixas ativas ainda não geradas em `target_m`
+        for r in get_recurring(active_only=True):
+            if r.get('last_generated') and r['last_generated'] >= target_m:
+                continue
+            if r.get('weekday') is not None:
+                for d_num in range(1, max_day + 1):
+                    dt = date(year, month_num, d_num)
+                    if dt.weekday() == r['weekday']:
+                        due_iso = dt.isoformat()
+                        if not any(x['title'] == r['title'] and x['due_date'] == due_iso for x in items):
+                            items.append({
+                                'id': None,
+                                'title': r['title'],
+                                'due_date': due_iso,
+                                'monthly_due': r['amount'],
+                                'remaining': r['amount'],
+                                'projected': True,
+                            })
+            else:
+                due_iso = f"{target_m}-{min(int(r['day']), max_day):02d}"
+                if not any(x['title'] == r['title'] for x in items):
+                    items.append({
+                        'id': None,
+                        'title': r['title'],
+                        'due_date': due_iso,
+                        'monthly_due': r['amount'],
+                        'remaining': r['amount'],
+                        'projected': True,
+                    })
+
+        # 2) Contas de abatimento mensal (Perfumes e Roupas - R$ 100/mês) que estão com data em mês anterior
+        for d in open_debts:
+            d_m = d['due_date'][:7]
+            rem = d['original_amount'] - d['paid_amount']
+            m_amt = monthly_due_amount(d)
+            if m_amt < rem and d_m < target_m:
+                k = _months_diff(d_m, target_m)
+                rem_at_target = rem - k * 10000
+                if rem_at_target > 0 and not any(x['title'] == d['title'] for x in items):
+                    amt_target = min(10000, rem_at_target)
+                    day_orig = int(d['due_date'][8:10])
+                    due_iso = f"{target_m}-{min(day_orig, max_day):02d}"
+                    items.append({
+                        'id': d['id'],
+                        'title': d['title'],
+                        'due_date': due_iso,
+                        'monthly_due': amt_target,
+                        'remaining': rem_at_target,
+                        'projected': True,
+                    })
+
+    items.sort(key=lambda x: (x['due_date'], x['title']))
+    return items
+
+
+def cumulative_planning(target_m=None):
+    """Calcula o fluxo de caixa em cascata desde o 1º mês ativo até `target_m`,
+    garantindo que novas parcelas e contas fixas reflitam com exatidão no saldo de cada mês."""
+    current = now().strftime('%Y-%m')
+    s = summary(current)
+    open_debts = get_debts(open_only=True)
+    debt_months = get_debt_months()
+    start_m = current if any(d['due_date'][:7] <= current for d in open_debts) else (debt_months[0] if debt_months else current)
+    target_m = target_m or start_m
+
+    # Monta sequência de meses de start_m até target_m
+    seq = [start_m]
+    cur_iter = start_m
+    while cur_iter < target_m and len(seq) < 36:
+        cur_iter = next_month(cur_iter)
+        seq.append(cur_iter)
+    if target_m < start_m:
+        seq = [target_m]
+
+    running_balance = s['total']
+    step_data = {}
+    for m in seq:
+        opening = running_balance
+        inc_info = fixed_income_status(m)
+        items = project_month_debts(m)
+        q1_items = [x for x in items if int(x['due_date'][8:10]) <= 15]
+        q2_items = [x for x in items if int(x['due_date'][8:10]) > 15]
+        q1_total = sum(x['monthly_due'] for x in q1_items)
+        q2_total = sum(x['monthly_due'] for x in q2_items)
+        registered_total = sum(x['monthly_due'] for x in items if not x['projected'])
+        projected_fixed_total = sum(x['monthly_due'] for x in items if x['projected'])
+        flow_total = q1_total + q2_total
+        closing = opening + inc_info['remaining_fixed'] - flow_total
+        step_data[m] = {
+            'month': m,
+            'start_m': start_m,
+            'opening_balance': opening,
+            'income_info': inc_info,
+            'items': items,
+            'q1_items': q1_items,
+            'q2_items': q2_items,
+            'q1_total': q1_total,
+            'q2_total': q2_total,
+            'registered_total': registered_total,
+            'projected_fixed_total': projected_fixed_total,
+            'flow_total': flow_total,
+            'closing_balance': closing,
+        }
+        running_balance = closing
+
+    return step_data[target_m]
+
+
 def planning():
     current = now().strftime('%Y-%m')
     s = summary(current)
@@ -589,17 +773,36 @@ def ai_context():
     lines.append('Dívidas/contas abertas (organizadas por mês de vencimento):')
     if debts:
         cur_m = None
+        m_sub = 0
         for d in debts:
             m_due = d['due_date'][:7]
             if m_due != cur_m:
+                if cur_m is not None:
+                    lines.append(f"  => Subtotal a pagar nas fichas de {cur_m[5:]}/{cur_m[:4]}: {brl(m_sub)}")
                 cur_m = m_due
+                m_sub = 0
                 lines.append(f"  [Vencimento em {m_due[5:]}/{m_due[:4]}]:")
             rem = d['original_amount'] - d['paid_amount']
             m_due_amt = monthly_due_amount(d)
+            m_sub += m_due_amt
             if m_due_amt < rem:
                 lines.append(f"  - #{d['id']} {d['title']}: a pagar neste mês {brl(m_due_amt)} (saldo total restante: {brl(rem)}); vence {short_date(d['due_date'])}")
             else:
                 lines.append(f"  - #{d['id']} {d['title']}: falta {brl(rem)}; vence {short_date(d['due_date'])}")
+        if cur_m is not None:
+            lines.append(f"  => Subtotal a pagar nas fichas de {cur_m[5:]}/{cur_m[:4]}: {brl(m_sub)}")
+        lines.append('')
+        lines.append('=== PROJEÇÃO OFICIAL POR MÊS (USE ESTES NÚMEROS EXATOS) ===')
+        for m_proj in get_debt_months()[:3]:
+            cp = cumulative_planning(m_proj)
+            m_lbl = f"{m_proj[5:]}/{m_proj[:4]}"
+            lines.append(
+                f"- Mês {m_lbl}: Saldo inicial {brl(cp['opening_balance'])} + "
+                f"Receitas a entrar {brl(cp['income_info']['remaining_fixed'])} - "
+                f"Total de contas do mês {brl(cp['flow_total'])} "
+                f"(fichas lançadas: {brl(cp['registered_total'])}, fixas/recorrentes previstas: {brl(cp['projected_fixed_total'])}) "
+                f"= Saldo final projetado em {m_lbl}: {brl(cp['closing_balance'])}"
+            )
     else:
         lines.append('- Nenhuma cadastrada')
     lines.append('')
