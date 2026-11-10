@@ -359,7 +359,8 @@ async def debt_list(update, context, month=None):
     all_debts = db.get_debts()
     if not all_debts:
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('➕ Nova conta a pagar', callback_data='mn:new_debt')],
+            [InlineKeyboardButton('➕ Nova conta a pagar', callback_data='mn:new_debt'),
+             InlineKeyboardButton('🔢 Dívida parcelada', callback_data='mn:new_installment')],
             [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
         ])
         await say(update, '🎉 Parabéns! Nenhuma conta ou dívida em aberto no momento.', keyboard=kb)
@@ -412,9 +413,10 @@ async def debt_list(update, context, month=None):
     rows_kb.extend([
         [InlineKeyboardButton('💳 Registrar pagamento de conta', callback_data='mn:paylist:0')],
         [InlineKeyboardButton('➕ Nova conta a pagar', callback_data='mn:new_debt'),
-         InlineKeyboardButton('✏️ Editar data/valor', callback_data='mn:editdebt_list:0')],
-        [InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0'),
-         InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
+         InlineKeyboardButton('🔢 Dívida parcelada', callback_data='mn:new_installment')],
+        [InlineKeyboardButton('✏️ Editar data/valor', callback_data='mn:editdebt_list:0'),
+         InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
+        [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
     ])
     await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(rows_kb), parse_mode='HTML')
 
@@ -802,17 +804,18 @@ async def reset_db_cmd(update, context):
 def menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💳 Pagar conta em aberto', callback_data='mn:paylist:0'),
-         InlineKeyboardButton('✏️ Editar conta (data/valor)', callback_data='mn:editdebt_list:0')],
-        [InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0'),
-         InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list')],
-        [InlineKeyboardButton('⏰ Lembretes', callback_data='mn:rem_list'),
-         InlineKeyboardButton('📜 Apagar/Estornar lançamento', callback_data='mn:txdel_list')],
-        [InlineKeyboardButton('📊 Relatório + CSV', callback_data='mn:report'),
-         InlineKeyboardButton('⚙️ Modelo de IA', callback_data='mn:mode')],
-        [InlineKeyboardButton('🗄️ Baixar Backup', callback_data='mn:backup'),
-         InlineKeyboardButton('🕒 Relógio do Bot', callback_data='mn:clock')],
-        [InlineKeyboardButton('🔋 Bateria do Celular', callback_data='mn:battery'),
-         InlineKeyboardButton('❓ Ajuda', callback_data='mn:help')],
+         InlineKeyboardButton('🔢 Dívida parcelada', callback_data='mn:new_installment')],
+        [InlineKeyboardButton('✏️ Editar conta (data/valor)', callback_data='mn:editdebt_list:0'),
+         InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
+        [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list'),
+         InlineKeyboardButton('⏰ Lembretes', callback_data='mn:rem_list')],
+        [InlineKeyboardButton('📜 Apagar/Estornar lançamento', callback_data='mn:txdel_list'),
+         InlineKeyboardButton('📊 Relatório + CSV', callback_data='mn:report')],
+        [InlineKeyboardButton('⚙️ Modelo de IA', callback_data='mn:mode'),
+         InlineKeyboardButton('🗄️ Baixar Backup', callback_data='mn:backup')],
+        [InlineKeyboardButton('🕒 Relógio do Bot', callback_data='mn:clock'),
+         InlineKeyboardButton('🔋 Bateria do Celular', callback_data='mn:battery')],
+        [InlineKeyboardButton('❓ Ajuda', callback_data='mn:help')],
     ])
 
 
@@ -1158,6 +1161,18 @@ async def menu_callback(update, context):
             '• Ex.: `Internet 99,90 15/11`\n\n'
             '*(Ou envie `cancelar` para desistir)*'
         )
+    elif cmd == 'new_installment':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'installment_title',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '🔢 *Nova Dívida Parcelada*\n\n'
+            'Qual é a **descrição / nome** da conta ou compra?\n'
+            '• Exemplo: `Tênis Nike` ou `Dentista`\n\n'
+            '*(Ou digite `cancelar` a qualquer momento)*'
+        )
     elif cmd == 'new_rec':
         context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
             'mode': 'new_rec',
@@ -1388,6 +1403,103 @@ async def _chat(update, context):
                     await say(update, f'Dados inválidos: {exc}')
                     return
             await say(update, 'Informe o nome, valor e o dia (1 a 28) ou dia da semana. Exemplo: `Faculdade 570,00 dia 10`')
+            return
+        elif mode_state == 'installment_title':
+            title = prompt.strip()
+            if not title:
+                await say(update, 'Informe o nome da dívida/compra (ex.: `Tênis Nike`).')
+                return
+            edit_state['mode'] = 'installment_amount'
+            edit_state['title'] = title
+            edit_state['updated_at'] = db.now().timestamp()
+            await say(
+                update,
+                f'📌 *{title}*\n\n'
+                'Qual é o **valor total** da compra?\n'
+                '• Exemplo: `100,00` ou `100`'
+            )
+            return
+        elif mode_state == 'installment_amount':
+            tokens = [t for t in prompt.split() if re.search(r'\d', t)]
+            val_token = tokens[-1] if tokens else prompt
+            try:
+                total_cents = db.money_to_cents(val_token)
+            except ValueError:
+                await say(update, 'Valor inválido. Digite o valor total (ex.: `100,00`):')
+                return
+            edit_state['mode'] = 'installment_count'
+            edit_state['total_amount'] = total_cents
+            edit_state['updated_at'] = db.now().timestamp()
+            await say(
+                update,
+                f'💰 *Total:* `{db.brl(total_cents)}`\n\n'
+                'Em **quantas parcelas** deseja dividir?\n'
+                '• Exemplo: `2`, `3`, `10`'
+            )
+            return
+        elif mode_state == 'installment_count':
+            m_count = re.search(r'\b(\d{1,2})\b', prompt)
+            if not m_count or int(m_count.group(1)) <= 0:
+                await say(update, 'Número de parcelas inválido. Digite quantas parcelas (ex.: `2` ou `3`):')
+                return
+            count = int(m_count.group(1))
+            if count > 48:
+                await say(update, 'O limite máximo é de 48 parcelas.')
+                return
+            total_cents = edit_state['total_amount']
+            base_part = total_cents // count
+            rem_part = total_cents % count
+            part_sample = base_part + (1 if rem_part > 0 else 0)
+            edit_state['mode'] = 'installment_due'
+            edit_state['count'] = count
+            edit_state['updated_at'] = db.now().timestamp()
+            await say(
+                update,
+                f'🔢 *Dividir em {count}x de aprox.* `{db.brl(part_sample)}`\n\n'
+                'Qual é a **data de vencimento da 1ª parcela**?\n'
+                '• Exemplo: `20/11/2026` ou `20/11`\n'
+                '*(As parcelas seguintes vencerão automaticamente no mesmo dia de cada mês)*'
+            )
+            return
+        elif mode_state == 'installment_due':
+            m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', prompt)
+            if not m_dt:
+                await say(update, 'Data não reconhecida. Informe no formato DD/MM/AAAA (ex.: `20/11/2026`):')
+                return
+            day_s, mon_s, yr_s = m_dt.group(1), m_dt.group(2), m_dt.group(3) or str(db.now().year)
+            try:
+                first_due = db.parse_date(f'{int(day_s):02d}/{int(mon_s):02d}/{yr_s}')
+            except ValueError as exc:
+                await say(update, f'Data inválida: {exc}. Digite DD/MM/AAAA (ex.: `20/11/2026`):')
+                return
+
+            title = edit_state['title']
+            total_cents = edit_state['total_amount']
+            count = edit_state['count']
+            edit_states.pop(user_id, None)
+
+            base_val = total_cents // count
+            remainder = total_cents % count
+            installments = []
+            cur_due = first_due
+            lines_preview = [
+                f'🔢 *Dívida Parcelada — {title}*',
+                f'💰 *Total:* `{db.brl(total_cents)}` em *{count} parcelas*:\n'
+            ]
+            for idx in range(1, count + 1):
+                part_amount = base_val + (1 if idx <= remainder else 0)
+                part_title = f"{title} [{idx}/{count}]"
+                installments.append({
+                    'title': part_title,
+                    'amount': part_amount,
+                    'due_date': cur_due
+                })
+                lines_preview.append(f'• {part_title}: `{db.brl(part_amount)}` — 🗓 `{db.short_date(cur_due)}`')
+                cur_due = db._next_month_due(cur_due)
+
+            lines_preview.append('\nPosso cadastrar todas essas parcelas na sua lista de contas a pagar?')
+            action = {'type': 'debt_installments', 'title': title, 'installments': installments}
+            await ask_action_confirmation(update, context, action, '\n'.join(lines_preview))
             return
         elif mode_state == 'new_rem':
             edit_states.pop(user_id, None)
@@ -1797,6 +1909,18 @@ async def natural_action_callback(update, context):
             await query.edit_message_text(
                 f'✅ Conta adicionada (#{debt_id}).\n{action["title"]}: {db.brl(action["amount"])}\n'
                 f'Vencimento: {db.short_date(action["due_date"])}')
+        elif action_type == 'debt_installments':
+            items = action.get('installments', [])
+            created_ids = []
+            for item in items:
+                did = db.add_debt(int(item['amount']), item['due_date'], item['title'])
+                created_ids.append(did)
+            tot_amt = sum(item['amount'] for item in items)
+            await query.edit_message_text(
+                f'✅ {len(items)} parcelas cadastradas com sucesso para “{action["title"]}”!\n'
+                f'💰 Total: {db.brl(tot_amt)}\n'
+                f'Primeiro vencimento: {db.short_date(items[0]["due_date"])}\n'
+                f'Último vencimento: {db.short_date(items[-1]["due_date"])}')
         elif action_type == 'debt_payment':
             remaining = db.pay_debt(int(action['debt_id']), int(action['amount']))
             next_kb = InlineKeyboardMarkup([[

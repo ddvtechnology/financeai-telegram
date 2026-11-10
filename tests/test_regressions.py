@@ -373,6 +373,67 @@ class RegressionTests(unittest.TestCase):
                 asyncio.run(bot.photo_handler(upd_photo, ctx))
                 self.assertIn('Plano celular', msg_photo.reply_text.call_args.args[0])
 
+    def test_installment_creation_flow(self):
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+        msg = SimpleNamespace(text='', reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
+        q = SimpleNamespace(data='mn:new_installment', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+        upd = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                              effective_user=SimpleNamespace(id=1), message=None, callback_query=q)
+
+        with mock.patch.object(bot, 'OWNER_ID', 1):
+            # 1. Clica no botão "🔢 Dívida parcelada"
+            asyncio.run(bot.menu_callback(upd, ctx))
+            state = ctx.application.bot_data['edit_debt_state'][1]
+            self.assertEqual(state['mode'], 'installment_title')
+
+            # 2. Usuário digita o nome
+            msg_user = SimpleNamespace(text='Tênis', reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
+            upd_text = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                       effective_user=SimpleNamespace(id=1), message=msg_user, callback_query=None)
+            asyncio.run(bot.chat(upd_text, ctx))
+            self.assertEqual(state['mode'], 'installment_amount')
+            self.assertEqual(state['title'], 'Tênis')
+
+            # 3. Usuário digita o valor total (100)
+            msg_user.text = '100,00'
+            asyncio.run(bot.chat(upd_text, ctx))
+            self.assertEqual(state['mode'], 'installment_count')
+            self.assertEqual(state['total_amount'], 10000)
+
+            # 4. Usuário digita o número de parcelas (2)
+            msg_user.text = '2'
+            asyncio.run(bot.chat(upd_text, ctx))
+            self.assertEqual(state['mode'], 'installment_due')
+            self.assertEqual(state['count'], 2)
+
+            # 5. Usuário digita a data da 1ª parcela (20/11/2026)
+            msg_user.text = '20/11/2026'
+            asyncio.run(bot.chat(upd_text, ctx))
+            # O estado deve ser consumido e a confirmação gerada
+            self.assertNotIn(1, ctx.application.bot_data['edit_debt_state'])
+            pending = ctx.application.bot_data['natural_actions']
+            self.assertEqual(len(pending), 1)
+            nonce, entry = next(iter(pending.items()))
+            action = entry['action']
+            self.assertEqual(action['type'], 'debt_installments')
+            self.assertEqual(len(action['installments']), 2)
+            self.assertEqual(action['installments'][0]['title'], 'Tênis [1/2]')
+            self.assertEqual(action['installments'][0]['amount'], 5000)
+            self.assertEqual(action['installments'][0]['due_date'], '2026-11-20')
+            self.assertEqual(action['installments'][1]['title'], 'Tênis [2/2]')
+            self.assertEqual(action['installments'][1]['amount'], 5000)
+            self.assertEqual(action['installments'][1]['due_date'], '2026-12-20')
+
+            # 6. Confirmar registro
+            q_confirm = SimpleNamespace(data=f'nl:confirm:{nonce}', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+            upd_confirm = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                          effective_user=SimpleNamespace(id=1), message=None, callback_query=q_confirm)
+            asyncio.run(bot.natural_action_callback(upd_confirm, ctx))
+            debts = db.get_debts()
+            titles = [d['title'] for d in debts]
+            self.assertIn('Tênis [1/2]', titles)
+            self.assertIn('Tênis [2/2]', titles)
+
 
 if __name__ == '__main__':
     unittest.main()
