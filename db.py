@@ -731,12 +731,21 @@ def ai_context():
     s = summary()
     debts = get_debts(open_only=True)
     tx = get_transactions(15)
+    with conn() as c:
+        last_inc = c.execute("SELECT * FROM transactions WHERE kind='receita' ORDER BY occurred_at DESC, id DESC LIMIT 1").fetchone()
+        last_exp = c.execute("SELECT * FROM transactions WHERE kind='despesa' ORDER BY occurred_at DESC, id DESC LIMIT 1").fetchone()
     profile = get_profile()
     lines = [
         f"Mês atual: {s['month']}",
         f"Receitas registradas no mês: {brl(s['receita'])}",
         f"Despesas registradas no mês: {brl(s['despesa'])}",
         f"Saldo histórico registrado (todas as movimentações): {brl(s['total'])}",
+        ("Última receita real registrada no banco: "
+         f"#{last_inc['id']} {short_date(last_inc['occurred_at'])} | {brl(last_inc['amount'])} | {last_inc['category']} — {last_inc['description']}"
+         if last_inc else "Última receita real registrada no banco: Nenhuma"),
+        ("Última despesa real registrada no banco: "
+         f"#{last_exp['id']} {short_date(last_exp['occurred_at'])} | {brl(last_exp['amount'])} | {last_exp['category']} — {last_exp['description']}"
+         if last_exp else "Última despesa real registrada no banco: Nenhuma"),
     ]
 
     # Perfil estruturado — dados de renda e planejamento

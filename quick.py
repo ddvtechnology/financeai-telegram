@@ -45,8 +45,35 @@ def _infer_category(kind, plain):
     return 'Outros'
 
 
+def _parse_structured_fields(text):
+    """Reconhece mensagens copiadas no formato 'Tipo: Receita / Valor: R$ 60,00 / Categoria: ... / Descrição: ... / Data: ...'."""
+    raw = str(text or '')
+    m_kind = re.search(r'(?im)^\s*tipo\s*:\s*(receita|despesa)\b', raw)
+    m_amt = re.search(r'(?im)^\s*valor\s*:\s*(?:r\$\s*)?([0-9.,]+)', raw)
+    if not m_kind or not m_amt:
+        return None
+    kind = m_kind.group(1).lower()
+    m_cat = re.search(r'(?im)^\s*categoria\s*:\s*(.+)$', raw)
+    m_desc = re.search(r'(?im)^\s*descri[cç][aã]o\s*:\s*(.+)$', raw)
+    m_dt = re.search(r'(?im)^\s*data\s*:\s*(\d{2})/(\d{2})/(\d{4})\b', raw)
+    category = m_cat.group(1).strip() if m_cat else ('Receita' if kind == 'receita' else 'Outros')
+    description = m_desc.group(1).strip() if m_desc else category
+    occurred_date = f'{m_dt.group(3)}-{m_dt.group(2)}-{m_dt.group(1)}' if m_dt else None
+    return {
+        'type': 'transaction',
+        'kind': kind,
+        'amount': m_amt.group(1),
+        'category': category,
+        'description': description,
+        'occurred_date': occurred_date,
+    }
+
+
 def parse(text, today):
     """Retorna dict no formato do interpretador (type=transaction) ou None se não for frase simples."""
+    structured = _parse_structured_fields(text)
+    if structured:
+        return structured
     m = _START.match(str(text or ''))
     if not m:
         return None
@@ -69,6 +96,8 @@ def parse(text, today):
 
 
 def is_record_attempt(text):
-    """Frase em 1ª pessoa de registro (recebi/gastei... + número): nunca pode ir ao chat livre."""
+    """Frase em 1ª pessoa de registro (recebi/gastei... + número) ou formulário estruturado: nunca pode ir ao chat livre."""
+    if _parse_structured_fields(text):
+        return True
     m = _START.match(str(text or ''))
     return bool(m and _AMOUNT.search(m.group(2)))

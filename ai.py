@@ -28,6 +28,7 @@ DADOS E REGRAS ANTI-ALUCINAÇÃO:
 - NUNCA invente receitas, freelas, salários fictícios (ex: R$ 3.500, freela R$ 1.200) ou datas que não estejam no perfil ou no banco de dados.
 - NUNCA faça perguntas sobre valores ou receitas que JÁ CONSTAM no perfil financeiro (ex: salário, adiantamento, complemento, contrato municipal). Use os dados fornecidos!
 - NUNCA diga que registrou, confirmou, lançou, atualizou ou contabilizou algo. Quem grava é o aplicativo, só depois do botão Confirmar. Se o usuário disser que recebeu/gastou algo, peça que reenvie a frase com valor e descrição.
+- Para saber qual foi a última receita, última despesa ou histórico real, consulte EXCLUSIVAMENTE os campos 'Última receita real registrada no banco', 'Última despesa real registrada no banco' e 'Últimas movimentações' dos DADOS FINANCEIROS ATUAIS. Nunca confie em lançamentos citados apenas no histórico de conversa se não estiverem no banco.
 - Sobre dívidas, parcelas e contas a pagar use SOMENTE a seção 'Dívidas/contas abertas' do contexto. Nunca invente parcelas já pagas, saldos devedores ou totais que não estejam lá; se faltar o dado, diga que não consta no app.
 - NUNCA monte projeções, somas ou saldos novos; mostre apenas números que o aplicativo forneceu.
 - NUNCA peça desculpas dizendo que 'não tem acesso ao banco de dados neste chat' nem aja como se estivesse sem os dados, pois você tem os dados fornecidos no contexto do sistema.
@@ -388,6 +389,14 @@ async def interpret_image(image_bytes, mime_type='image/jpeg', caption=''):
     return result
 
 
+_FAKE_RECORD_CLAIM = re.compile(
+    r'(?:✅\s*)?(?:receita|despesa|conta|d[ií]vida|lan[cç]amento|pagamento|lembrete)\s+'
+    r'(?:registrad[oa]|adicionad[oa]|salvo|salva|atualizad[oa]|quitad[oa]|contabilizad[oa])'
+    r'|saldo\s+(?:do\s+dia\s+)?atualizado\s*:',
+    re.I,
+)
+
+
 async def answer(prompt):
     direct = clock_answer(prompt)
     if direct:
@@ -404,6 +413,13 @@ async def answer(prompt):
     response, used, extra = await asyncio.to_thread(
         _request_with_fallback, prompt, messages, 1500, 0.3
     )
+    if _FAKE_RECORD_CLAIM.search(str(response)):
+        return (
+            '⚠️ *Nenhum registro foi salvo no banco!*\n\n'
+            'Para lançar uma receita ou despesa, envie em uma frase simples '
+            '(ex.: `Recebi R$ 60,00 de Design`) ou use `/receita` / `/despesa` '
+            'e toque em *✅ Confirmar registro*.'
+        )
     remember('user', prompt)
     remember('assistant', response)
     note = '\n\n[Resposta cortada por limite de tamanho. Escreva “continue” para ver o resto.]' if getattr(response, 'truncated', False) else ''

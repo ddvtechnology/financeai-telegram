@@ -441,6 +441,38 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(cp_dec['registered_total'], 5000)
             self.assertEqual(cp_dec['opening_balance'], cp_nov['closing_balance'])
 
+    def test_structured_text_parse_and_fake_record_claim_blocked(self):
+        # 1. Texto copiado no formato Tipo/Valor/Categoria/Descrição/Data vira transação determinística
+        copied = (
+            'Tipo: Receita\n'
+            'Valor: R$ 60,00\n'
+            'Categoria: Renda Extra\n'
+            'Descrição: Design\n'
+            'Data: 12/11/2026'
+        )
+        parsed = bot.quick.parse(copied, db.now().date())
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed['type'], 'transaction')
+        self.assertEqual(parsed['kind'], 'receita')
+        self.assertEqual(parsed['amount'], '60,00')
+        self.assertEqual(parsed['category'], 'Renda Extra')
+        self.assertEqual(parsed['description'], 'Design')
+        self.assertEqual(parsed['occurred_date'], '2026-11-12')
+        self.assertTrue(bot.quick.is_record_attempt(copied))
+
+        # 2. Se ai.answer alucinar que registrou, o guardrail bloqueia e não salva em messages
+        fake_hallucination = ai._Text('✅ Receita registrada!\n\n💰 R$ 60,00 | Renda Extra — Design\n\nSaldo do dia atualizado: R$ 1.157,05')
+        with mock.patch.object(ai, '_request_with_fallback', return_value=(fake_hallucination, 'rapido', '')):
+            reply = asyncio.run(ai.answer('qualquer coisa'))
+        self.assertIn('Nenhum registro foi salvo no banco', reply)
+        self.assertEqual(db.last_messages(5), [])
+
+        # 3. ai_context destaca a última receita real do banco
+        db.insert_transaction('receita', 7000, 'Renda Fixa', 'Sistema Joaninha baby kids', '2026-11-09')
+        ctx_text = db.ai_context()
+        self.assertIn('Última receita real registrada no banco:', ctx_text)
+        self.assertIn('Sistema Joaninha baby kids', ctx_text)
+
 
 if __name__ == '__main__':
     unittest.main()
