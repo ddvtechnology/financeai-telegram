@@ -543,6 +543,82 @@ def asks_history(text):
     return 'todas'
 
 
+def direct_db_answer(text):
+    """Responde consultas simples direto do SQLite (última receita/despesa, gastos de hoje/mês), sem IA."""
+    plain = normalized(text)
+    if len(plain) > 100:
+        return None
+
+    # 1. Última receita / última despesa / último lançamento
+    m_last = re.fullmatch(
+        r'(?:qual (?:foi |e )?(?:a |o )?(?:minha |meu )?)?(?:ultima|ultimo)\s+'
+        r'(receita|receira|entrada|despesa|gasto|lancamento|movimentacao|transacao)(?:\s+registrad[oa])?',
+        plain,
+    )
+    if m_last:
+        w = m_last.group(1)
+        kind = 'receita' if w in ('receita', 'receira', 'entrada') else ('despesa' if w in ('despesa', 'gasto') else None)
+        sql = 'SELECT * FROM transactions' + (' WHERE kind=?' if kind else '') + ' ORDER BY occurred_at DESC, id DESC LIMIT 1'
+        with db.conn() as c:
+            row = c.execute(sql, (kind,) if kind else ()).fetchone()
+        label = 'receita' if kind == 'receita' else ('despesa' if kind == 'despesa' else 'movimentação')
+        if not row:
+            return f'📭 Nenhuma {label} registrada no banco até o momento.'
+        emoji = '➕' if row['kind'] == 'receita' else '➖'
+        return (
+            f'💰 *Última {label} registrada no banco:*\n'
+            f'{emoji} *#{row["id"]}* {db.short_date(row["occurred_at"])} — `{db.brl(row["amount"])}`\n'
+            f'🏷️ {row["category"]} — {row["description"]}'
+        )
+
+    # 2. Quanto gastei / recebi hoje, ontem ou este mês (com filtro opcional)
+    m_sum = re.fullmatch(
+        r'quanto\s+(?:eu\s+)?(gastei|paguei|recebi|ganhei)\s+'
+        r'(?:com\s+(.+?)\s+)?'
+        r'(hoje|ontem|este mes|esse mes|neste mes|nesse mes|no mes)',
+        plain,
+    )
+    if not m_sum:
+        m_sum = re.fullmatch(
+            r'quanto\s+(?:eu\s+)?(gastei|paguei|recebi|ganhei)\s+'
+            r'(hoje|ontem|este mes|esse mes|neste mes|nesse mes|no mes)(?:\s+com\s+(.+))?',
+            plain,
+        )
+        if m_sum:
+            verb, period, term = m_sum.group(1), m_sum.group(2), m_sum.group(3)
+        else:
+            verb = period = term = None
+    else:
+        verb, term, period = m_sum.group(1), m_sum.group(2), m_sum.group(3)
+
+    if verb and period:
+        kind = 'receita' if verb in ('recebi', 'ganhei') else 'despesa'
+        today = db.now().date()
+        if period == 'hoje':
+            prefix = today.isoformat()
+            p_label = f'hoje ({db.short_date(prefix)})'
+        elif period == 'ontem':
+            prefix = (today - timedelta(days=1)).isoformat()
+            p_label = f'ontem ({db.short_date(prefix)})'
+        else:
+            prefix = today.strftime('%Y-%m')
+            p_label = f'em {prefix[5:]}/{prefix[:4]}'
+        with db.conn() as c:
+            rows = c.execute(
+                'SELECT amount, category, description FROM transactions WHERE kind=? AND occurred_at LIKE ?',
+                (kind, prefix + '%'),
+            ).fetchall()
+        if term:
+            t_norm = normalized(term)
+            rows = [r for r in rows if t_norm in normalized(r['category']) or t_norm in normalized(r['description'])]
+        total_amt = sum(int(r['amount']) for r in rows)
+        cnt = len(rows)
+        verb_lbl = 'recebeu' if kind == 'receita' else 'gastou'
+        term_lbl = f' com *{term.strip()}*' if term else ''
+        return f'📊 Você {verb_lbl}{term_lbl} {p_label}: `{db.brl(total_amt)}` ({cnt} lançamento(s)).'
+    return None
+
+
 async def history(update, context, kind=None):
     if not await guard(update):return
     transactions=db.get_transactions(60 if kind else 20)
@@ -556,7 +632,8 @@ async def history(update, context, kind=None):
         [InlineKeyboardButton('📋 Todas', callback_data='mn:hist:all'),
          InlineKeyboardButton('🟢 Receitas', callback_data='mn:hist:receita'),
          InlineKeyboardButton('🔴 Despesas', callback_data='mn:hist:despesa')],
-        [InlineKeyboardButton('🗑️ Apagar ou Estornar lançamento', callback_data='mn:txdel_list')],
+        [InlineKeyboardButton('✏️ Editar lançamento', callback_data='mn:txedit_list'),
+         InlineKeyboardButton('🗑️ Apagar ou Estornar', callback_data='mn:txdel_list')],
     ])
     await say(update, '\n'.join(lines), keyboard=kb)
 
@@ -597,16 +674,12 @@ async def plan(update, context, month=None):
     remaining_income_m = inc['remaining_fixed']
     received_fixed_m = inc['received_fixed']
 
-    j_tag = ' ✅ *(já recebido)*' if inc['joaninha_ok'] and target_m == p['month'] else ''
-    s15_tag = ' ✅ *(já recebido)*' if inc['sal15_ok'] and target_m == p['month'] else ''
-    s30_tag = ' ✅ *(já recebido)*' if inc['sal30_ok'] and target_m == p['month'] else ''
-
-    income_lines = [
-        f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`',
-        f'  • Até dia 10: `R$ 70,00` (Sistema Joaninha){j_tag}',
-        f'  • Dia 15: `R$ 935,00` (Salário 1ª parcela){s15_tag}',
-        f'  • Dia 30: `R$ 830,00` (Salário 2ª parcela){s30_tag}',
-    ]
+    income_lines = [f'🟢 *Receitas Fixas Previstas em {m_br}:* `{db.brl(expected_income_m)}`']
+    for item in inc.get('items', []):
+        tag = ' ✅ *(já recebido)*' if item.get('received') and target_m == p['month'] else ''
+        income_lines.append(f'  • Dia {item["day"]:02d}: `{db.brl(item["amount"])}` ({item["title"]}){tag}')
+    if not inc.get('items'):
+        income_lines.append('  • Nenhuma receita fixa cadastrada.')
     if target_m == p['month'] and received_fixed_m > 0:
         income_lines.append(f'  • *Já recebido das fixas em {m_br}:* `{db.brl(received_fixed_m)}` (já no caixa)')
         income_lines.append(f'  • *Falta entrar em {m_br}:* `{db.brl(remaining_income_m)}`')
@@ -810,6 +883,26 @@ async def reset_db_cmd(update, context):
         'Um backup completo será enviado automaticamente neste chat antes de limpar tudo.')
 
 
+async def fixed_income_list(update, context):
+    if not await guard(update): return
+    rows = db.get_fixed_incomes()
+    if not rows:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('➕ Nova receita fixa', callback_data='mn:new_inc')]])
+        await say(update, 'Não há receitas fixas cadastradas.\nToque no botão abaixo para cadastrar uma fonte de renda mensal:', keyboard=kb)
+        return
+    total = sum(r['amount'] for r in rows)
+    lines = [f'🟢 *RECEITAS FIXAS CADASTRADAS (Total: {db.brl(total)}/mês):*\n']
+    buttons = []
+    for r in rows:
+        lines.append(f'• *#{r["id"]} {r["title"]}* — {db.brl(r["amount"])} (todo dia {r["day"]:02d} | {r["category"]})')
+        buttons.append([
+            InlineKeyboardButton(f'✏️ Valor #{r["id"]} ({r["title"][:14]})', callback_data=f'mn:incedit:{r["id"]}'),
+            InlineKeyboardButton(f'🗑️ Excluir #{r["id"]}', callback_data=f'mn:incdel:{r["id"]}'),
+        ])
+    buttons.append([InlineKeyboardButton('➕ Nova receita fixa', callback_data='mn:new_inc')])
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons))
+
+
 def menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💳 Pagar conta em aberto', callback_data='mn:paylist:0'),
@@ -817,7 +910,9 @@ def menu_keyboard():
         [InlineKeyboardButton('✏️ Editar conta (data/valor)', callback_data='mn:editdebt_list:0'),
          InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
         [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list'),
-         InlineKeyboardButton('⏰ Lembretes', callback_data='mn:rem_list')],
+         InlineKeyboardButton('🟢 Receitas fixas', callback_data='mn:inc_list')],
+        [InlineKeyboardButton('⏰ Lembretes', callback_data='mn:rem_list'),
+         InlineKeyboardButton('✏️ Editar lançamento', callback_data='mn:txedit_list')],
         [InlineKeyboardButton('📜 Apagar/Estornar lançamento', callback_data='mn:txdel_list'),
          InlineKeyboardButton('📊 Relatório + CSV', callback_data='mn:report')],
         [InlineKeyboardButton('⚙️ Modelo de IA', callback_data='mn:mode'),
@@ -852,6 +947,8 @@ async def menu_callback(update, context):
         await debt_list(update, context, month=arg)
     elif cmd == 'rec_list':
         await recurring_list(update, context)
+    elif cmd == 'inc_list':
+        await fixed_income_list(update, context)
     elif cmd == 'rem_list':
         await reminder_list(update, context)
     elif cmd == 'report' or cmd == 'rep':
@@ -865,6 +962,18 @@ async def menu_callback(update, context):
             await say(update, f'Não há movimentações registradas em {month[5:]}/{month[:4]} para gerar planilha.')
     elif cmd == 'plan':
         await plan(update, context, month=arg)
+    elif cmd == 'qinc_id':
+        inc_id = int(arg)
+        inc = next((r for r in db.get_fixed_incomes() if r['id'] == inc_id), None)
+        if not inc:
+            await say(update, 'Receita fixa não encontrada.')
+            return
+        action = {'type': 'transaction', 'kind': 'receita', 'amount': inc['amount'],
+                  'category': inc['category'], 'description': inc['title'], 'occurred_date': None}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Confira antes de registrar:\n\nTipo: Receita\nValor: {db.brl(inc["amount"])}\nCategoria: {inc["category"]}\nDescrição: {inc["title"]}\n\nPosso salvar no seu histórico financeiro?'
+        )
     elif cmd == 'qinc':
         presets = {
             'sal15': (93500, 'Salário', 'Salário (1ª parcela dia 15)'),
@@ -1128,6 +1237,83 @@ async def menu_callback(update, context):
                 callback_data=f'mn:txdel:{t["id"]}'
             )])
         await say(update, '📜 *Selecione o lançamento que deseja apagar ou estornar:*', keyboard=InlineKeyboardMarkup(buttons))
+    elif cmd == 'txedit_list':
+        txs = [t for t in db.get_transactions(20) if not t['debt_id']][:10]
+        if not txs:
+            await say(update, 'Não há lançamentos avulsos recentes para editar.\n*(Pagamentos de dívida devem ser estornados em 🗑️ Apagar/Estornar)*')
+            return
+        buttons = [[InlineKeyboardButton(
+            f'✏️ #{t["id"]} {db.short_date(t["occurred_at"])[:5]} {db.brl(t["amount"])} ({t["description"][:16]})',
+            callback_data=f'mn:txedit:{t["id"]}'
+        )] for t in txs]
+        await say(update, '✏️ *Selecione o lançamento que deseja editar:*', keyboard=InlineKeyboardMarkup(buttons))
+    elif cmd == 'txedit':
+        tx_id = int(arg)
+        tx = db.get_transaction(tx_id)
+        if not tx:
+            await say(update, 'Lançamento não encontrado.')
+            return
+        if tx['debt_id']:
+            await say(update, 'Pagamentos de dívida não podem ser editados por aqui. Use ↩️ Estornar no histórico.')
+            return
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'tx_id': tx_id,
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            f'✏️ *Editando Lançamento #{tx["id"]} ({tx["kind"].capitalize()})*\n'
+            f'• Valor atual: `{db.brl(tx["amount"])}`\n'
+            f'• Data atual: `{db.short_date(tx["occurred_at"])}`\n'
+            f'• Categoria: `{tx["category"]}`\n'
+            f'• Descrição: `{tx["description"]}`\n\n'
+            'Digite no chat o que deseja alterar:\n'
+            '• Só o valor: `55,00`\n'
+            '• Só a data: `10/11/2026`\n'
+            '• Só a descrição: `Almoço executivo`\n'
+            '• Ou juntos: `55,00 10/11/2026 Almoço executivo`\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
+    elif cmd == 'new_inc':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'new_inc',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '🟢 *Nova Receita Fixa*\n\n'
+            'Digite no chat o **nome**, **valor** e o **dia do recebimento (1 a 30)**:\n'
+            '• Ex.: `Aluguel Kitnet 600,00 dia 5`\n'
+            '• Ex.: `Salário 1500,00 dia 15`\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
+    elif cmd == 'incedit':
+        inc_id = int(arg)
+        inc = next((r for r in db.get_fixed_incomes(active_only=False) if r['id'] == inc_id), None)
+        if not inc:
+            await say(update, 'Receita fixa não encontrada.')
+            return
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'inc_id': inc_id,
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            f'✏️ *Editando Receita Fixa #{inc["id"]}: {inc["title"]}*\n'
+            f'• Valor atual: `{db.brl(inc["amount"])}`\n\n'
+            'Digite no chat o **novo valor** dessa receita fixa (ex.: `950,00`).'
+        )
+    elif cmd == 'incdel':
+        inc_id = int(arg)
+        inc = next((r for r in db.get_fixed_incomes(active_only=False) if r['id'] == inc_id), None)
+        if not inc:
+            await say(update, 'Receita fixa não encontrada.')
+            return
+        action = {'type': 'fixed_income_delete', 'inc_id': inc_id, 'title': inc['title']}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Excluir a receita fixa #{inc_id} ({inc["title"]} — {db.brl(inc["amount"])})?'
+        )
     elif cmd == 'txdel':
         tx_id = int(arg)
         tx = db.get_transaction(tx_id)
@@ -1278,11 +1464,13 @@ async def _chat(update, context):
     if shortcut == normalized('💰 Saldo'):
         await balance(update, context); return
     if shortcut == normalized('➕ Registrar receita'):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton('🟢 Salário Dia 15 (R$ 935,00)', callback_data='mn:qinc:sal15')],
-            [InlineKeyboardButton('🟢 Salário Fim do Mês (R$ 830,00)', callback_data='mn:qinc:sal30')],
-            [InlineKeyboardButton('🟢 Sistema Joaninha (R$ 70,00)', callback_data='mn:qinc:joaninha')],
-        ])
+        fixed_list = db.get_fixed_incomes()
+        inc_buttons = [
+            [InlineKeyboardButton(f'🟢 {inc["title"][:24]} ({db.brl(inc["amount"])})', callback_data=f'mn:qinc_id:{inc["id"]}')]
+            for inc in fixed_list
+        ]
+        inc_buttons.append([InlineKeyboardButton('⚙️ Gerenciar receitas fixas', callback_data='mn:inc_list')])
+        kb = InlineKeyboardMarkup(inc_buttons)
         await say(
             update,
             '🟢 *Registrar Receita*\n\n'
@@ -1327,6 +1515,10 @@ async def _chat(update, context):
     wanted = asks_history(prompt)
     if wanted:
         await history(update, context, None if wanted == 'todas' else wanted); return
+
+    direct_ans = direct_db_answer(prompt)
+    if direct_ans:
+        await say(update, direct_ans); return
 
     user_id = update.effective_user.id
     edit_states = context.application.bot_data.setdefault('edit_debt_state', {})
@@ -1539,6 +1731,107 @@ async def _chat(update, context):
                     await say(update, f'Data inválida: {exc}')
                     return
             prompt = f'Me lembra: {prompt}'
+        elif mode_state == 'new_inc':
+            rest = prompt
+            day_val = None
+            m_day = re.search(r'\b(?:todo\s+)?dia\s+(\d{1,2})\b', rest, re.I)
+            if m_day:
+                day_val = int(m_day.group(1))
+                rest = (rest[:m_day.start()] + ' ' + rest[m_day.end():]).strip()
+            num_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+            if day_val is None and len(num_tokens) >= 2:
+                for tok in reversed(num_tokens):
+                    if re.fullmatch(r'\d{1,2}', tok) and 1 <= int(tok) <= 30:
+                        day_val = int(tok)
+                        rest = re.sub(rf'\b{tok}\b', ' ', rest, count=1).strip()
+                        num_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+                        break
+            if day_val is not None and 1 <= day_val <= 30 and num_tokens:
+                try:
+                    amt_str = num_tokens[-1]
+                    amount = db.money_to_cents(amt_str)
+                    title = rest.replace(amt_str, '', 1).replace('R$', '').strip(' -–—')
+                    if title:
+                        edit_states.pop(user_id, None)
+                        cat = 'Salário' if 'sal' in normalized(title) else 'Renda Fixa'
+                        action = {'type': 'fixed_income_add', 'title': title, 'amount': amount, 'day': day_val, 'category': cat}
+                        await ask_action_confirmation(
+                            update, context, action,
+                            f'Cadastrar nova receita fixa?\n\nFonte: {title}\nValor: {db.brl(amount)}\nDia do mês: {day_val:02d}'
+                        )
+                        return
+                except ValueError as exc:
+                    await say(update, f'Dados inválidos: {exc}')
+                    return
+            await say(update, 'Informe o nome, valor e dia (1 a 30). Exemplo: `Aluguel Kitnet 600,00 dia 5`')
+            return
+        elif 'inc_id' in edit_state:
+            try:
+                tokens = [t for t in prompt.split() if re.search(r'\d', t)]
+                new_amt = db.money_to_cents(tokens[-1] if tokens else prompt)
+                inc_id = edit_state['inc_id']
+                inc = next((r for r in db.get_fixed_incomes(active_only=False) if r['id'] == inc_id), None)
+                edit_states.pop(user_id, None)
+                if not inc:
+                    await say(update, 'Receita fixa não encontrada.')
+                    return
+                action = {'type': 'fixed_income_edit', 'inc_id': inc_id, 'title': inc['title'], 'new_amount': new_amt}
+                await ask_action_confirmation(
+                    update, context, action,
+                    f'Alterar valor da receita fixa #{inc_id} ({inc["title"]})?\n\n'
+                    f'De: {db.brl(inc["amount"])}\nPara: {db.brl(new_amt)}'
+                )
+                return
+            except ValueError as exc:
+                await say(update, f'Valor inválido: {exc}. Digite apenas o valor, por exemplo: 950,00')
+                return
+        elif 'tx_id' in edit_state:
+            tx_id = edit_state['tx_id']
+            tx = db.get_transaction(tx_id)
+            if not tx or tx['debt_id']:
+                edit_states.pop(user_id, None)
+                await say(update, 'Lançamento não encontrado ou protegido.')
+                return
+            rest = prompt.strip()
+            new_date = None
+            m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', rest)
+            if m_dt:
+                day_s, mon_s, yr_s = m_dt.group(1), m_dt.group(2), m_dt.group(3) or str(db.now().year)
+                try:
+                    new_date = db.parse_date(f'{int(day_s):02d}/{int(mon_s):02d}/{yr_s}')
+                except ValueError as exc:
+                    await say(update, f'Data inválida: {exc}. Digite no formato DD/MM/AAAA.')
+                    return
+                rest = (rest[:m_dt.start()] + ' ' + rest[m_dt.end():]).strip()
+            new_amt = None
+            amt_tokens = [t for t in rest.split() if re.fullmatch(r'(?:r\$\s*)?\d+(?:[.,]\d{1,2})?', t, re.I)]
+            if amt_tokens:
+                try:
+                    new_amt = db.money_to_cents(amt_tokens[0])
+                    rest = rest.replace(amt_tokens[0], '', 1).replace('R$', '').strip(' -–—')
+                except ValueError:
+                    new_amt = None
+            new_desc = rest.strip() or None
+            if new_amt is None and new_date is None and new_desc is None:
+                await say(update, 'Informe o novo valor, nova data ou nova descrição (ou `cancelar`).')
+                return
+            edit_states.pop(user_id, None)
+            action = {
+                'type': 'tx_edit',
+                'tx_id': tx_id,
+                'amount': new_amt if new_amt is not None else tx['amount'],
+                'occurred_date': new_date or tx['occurred_at'][:10],
+                'description': new_desc if new_desc is not None else tx['description'],
+                'category': tx['category'],
+            }
+            await ask_action_confirmation(
+                update, context, action,
+                f'Confirmar edição do lançamento #{tx_id}?\n\n'
+                f'• Valor: {db.brl(action["amount"])}\n'
+                f'• Data: {db.short_date(action["occurred_date"])}\n'
+                f'• Descrição: {action["description"]}'
+            )
+            return
         elif 'rec_id' in edit_state:
             try:
                 tokens = [t for t in prompt.split() if re.search(r'\d', t)]
@@ -1961,6 +2254,31 @@ async def natural_action_callback(update, context):
             db.delete_transaction(int(action['tx_id']))
             await query.edit_message_text(
                 f'🗑️ Lançamento #{action["tx_id"]} apagado.\nSaldo histórico registrado: {db.brl(db.summary()["total"])}')
+        elif action_type == 'tx_edit':
+            updated = db.update_transaction(
+                int(action['tx_id']),
+                amount=int(action['amount']),
+                category=action.get('category'),
+                description=action.get('description'),
+                occurred_date=action.get('occurred_date'),
+            )
+            await query.edit_message_text(
+                f'✅ Lançamento #{updated["id"]} atualizado!\n'
+                f'{updated["kind"].capitalize()}: {db.brl(updated["amount"])} | {db.short_date(updated["occurred_at"])}\n'
+                f'{updated["category"]} — {updated["description"]}\n'
+                f'Saldo histórico registrado: {db.brl(db.summary()["total"])}')
+        elif action_type == 'fixed_income_add':
+            inc_id = db.add_fixed_income(action['title'], int(action['amount']), int(action['day']), action.get('category', 'Renda Fixa'))
+            await query.edit_message_text(
+                f'✅ Receita fixa #{inc_id} cadastrada: {action["title"]} ({db.brl(action["amount"])}) todo dia {int(action["day"]):02d}.')
+        elif action_type == 'fixed_income_edit':
+            info = db.update_fixed_income(int(action['inc_id']), int(action['new_amount']))
+            await query.edit_message_text(
+                f'✅ Receita fixa #{action["inc_id"]} ({info["title"]}) atualizada para {db.brl(info["amount"])}!')
+        elif action_type == 'fixed_income_delete':
+            db.remove_fixed_income(int(action['inc_id']))
+            await query.edit_message_text(
+                f'🗑️ Receita fixa #{action["inc_id"]} ({action.get("title", "")}) excluída.')
         elif action_type == 'tx_refund_debt':
             info = db.refund_debt_payment(int(action['tx_id']))
             await query.edit_message_text(
@@ -2287,22 +2605,14 @@ async def on_stop(app):
         await asyncio.gather(task,return_exceptions=True)
 
 
-async def photo_handler(update, context):
-    """Lê fotos de comprovantes PIX, boletos e notas fiscais usando Gemini Vision."""
-    if not await guard(update):
-        return
-    if not update.message or not update.message.photo:
-        return
+async def _process_media_bytes(update, context, file_bytes, mime_type, caption=''):
+    """Analisa imagem ou PDF enviado pelo usuário via Gemini Vision e pede confirmação antes de gravar."""
     waiter = Waiting(update)
     waiter.start()
     try:
-        photo = update.message.photo[-1]
-        tg_file = await photo.get_file()
-        image_bytes = bytes(await tg_file.download_as_bytearray())
-        caption = (update.message.caption or '').strip()
-        result = await ai.interpret_image(image_bytes, mime_type='image/jpeg', caption=caption)
+        result = await ai.interpret_image(file_bytes, mime_type=mime_type, caption=caption)
         intent = result.get('type', 'transaction')
-        prompt_ref = caption or 'Comprovante/boleto em imagem'
+        prompt_ref = caption or ('Comprovante/boleto em PDF' if mime_type == 'application/pdf' else 'Comprovante/boleto em imagem')
         if intent == 'debt_payment':
             await prepare_natural_debt_payment(update, context, result, prompt_ref)
             return
@@ -2314,16 +2624,49 @@ async def photo_handler(update, context):
             return
         await say(
             update,
-            '📷 Recebi a imagem, mas não consegui identificar claramente o valor ou o tipo de comprovante/boleto.\n'
-            'Reenvie a foto com uma legenda curta (ex.: “Paguei conta de luz” ou “Boleto internet”) ou digite o valor no chat.'
+            '📄 Recebi o arquivo, mas não consegui identificar claramente o valor ou o tipo de comprovante/boleto.\n'
+            'Reenvie com uma legenda curta (ex.: “Paguei conta de luz” ou “Boleto internet”) ou digite o valor no chat.'
         )
     except RuntimeError as exc:
-        await say(update, f'📷 Não consegui ler a imagem: {exc}')
+        await say(update, f'📄 Não consegui ler o arquivo: {exc}')
     except Exception:
-        log.exception('Erro inesperado ao processar foto')
-        await say(update, 'Ocorreu um erro ao analisar a imagem. Tente novamente ou digite o lançamento no chat.')
+        log.exception('Erro inesperado ao processar mídia')
+        await say(update, 'Ocorreu um erro ao analisar o arquivo. Tente novamente ou digite o lançamento no chat.')
     finally:
         await waiter.stop()
+
+
+async def photo_handler(update, context):
+    """Lê fotos de comprovantes PIX, boletos e notas fiscais usando Gemini Vision."""
+    if not await guard(update):
+        return
+    if not update.message or not update.message.photo:
+        return
+    photo = update.message.photo[-1]
+    tg_file = await photo.get_file()
+    image_bytes = bytes(await tg_file.download_as_bytearray())
+    caption = (update.message.caption or '').strip()
+    await _process_media_bytes(update, context, image_bytes, 'image/jpeg', caption)
+
+
+async def document_handler(update, context):
+    """Lê PDFs ou imagens enviadas como arquivo (comprovantes bancários e boletos)."""
+    if not await guard(update):
+        return
+    doc = update.message.document if update.message else None
+    if not doc:
+        return
+    mime = (doc.mime_type or '').lower()
+    if mime != 'application/pdf' and not mime.startswith('image/'):
+        await say(update, '📄 Envie apenas **fotos** ou **arquivos PDF** de comprovantes e boletos.')
+        return
+    if doc.file_size and doc.file_size > 15 * 1024 * 1024:
+        await say(update, '📄 Arquivo muito grande (máximo 15 MB).')
+        return
+    tg_file = await doc.get_file()
+    file_bytes = bytes(await tg_file.download_as_bytearray())
+    caption = (update.message.caption or '').strip()
+    await _process_media_bytes(update, context, file_bytes, mime, caption)
 
 
 def main():
@@ -2366,6 +2709,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_callback,pattern='^mn:'))
     # block=False: enquanto a IA pensa, botões e comandos continuam funcionando
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler, block=False))
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler, block=False))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,chat,block=False))
     log.info('Iniciando o bot em long polling...')
     app.run_polling(drop_pending_updates=False)

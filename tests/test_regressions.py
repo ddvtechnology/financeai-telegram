@@ -473,6 +473,58 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('Última receita real registrada no banco:', ctx_text)
         self.assertIn('Sistema Joaninha baby kids', ctx_text)
 
+    def test_improvements_1_2_3_4(self):
+        # 1. Consultas diretas ao banco sem IA
+        today_iso = db.now().date().isoformat()
+        tx_inc = db.insert_transaction('receita', 6000, 'Renda Extra', 'Design', today_iso)
+        tx_exp = db.insert_transaction('despesa', 4500, 'Saúde', 'Farmácia', today_iso)
+        ans_last = bot.direct_db_answer('qual minha ultima receira?')
+        self.assertIsNotNone(ans_last)
+        self.assertIn('Design', ans_last)
+        self.assertIn('60,00', ans_last)
+        ans_today = bot.direct_db_answer('quanto gastei hoje?')
+        self.assertIn('45,00', ans_today)
+        ans_term = bot.direct_db_answer('quanto gastei com farmacia este mes?')
+        self.assertIn('45,00', ans_term)
+
+        # 2. Receitas fixas configuráveis
+        incomes = db.get_fixed_incomes()
+        self.assertEqual(len(incomes), 3)
+        inc_id = db.add_fixed_income('Aluguel Kitnet', 50000, 5)
+        db.update_fixed_income(inc_id, 55000)
+        status = db.fixed_income_status(db.now().strftime('%Y-%m'))
+        self.assertEqual(status['expected'], 183500 + 55000)
+        db.remove_fixed_income(inc_id)
+
+        # 3. document_handler aceita PDF
+        ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+        fake_file = SimpleNamespace(download_as_bytearray=mock.AsyncMock(return_value=bytearray(b'%PDF-1.4')))
+        fake_doc = SimpleNamespace(mime_type='application/pdf', file_size=1024, get_file=mock.AsyncMock(return_value=fake_file))
+        msg_doc = SimpleNamespace(
+            document=fake_doc, caption='Boleto luz',
+            chat=SimpleNamespace(send_action=mock.AsyncMock()),
+            reply_text=mock.AsyncMock()
+        )
+        upd_doc = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                  effective_user=SimpleNamespace(id=1), message=msg_doc, callback_query=None)
+        fake_pdf_res = {'type': 'debt', 'amount': '120.00', 'title': 'Conta de Luz', 'due_date': '2026-11-28'}
+        with mock.patch.object(ai, 'interpret_image', mock.AsyncMock(return_value=fake_pdf_res)) as m_vis:
+            asyncio.run(bot.document_handler(upd_doc, ctx))
+            m_vis.assert_called_once()
+            self.assertEqual(m_vis.call_args.kwargs['mime_type'], 'application/pdf')
+            self.assertIn('Conta de Luz', msg_doc.reply_text.call_args.args[0])
+
+        # 4. Edição de lançamento no histórico (e proteção de pagamento de dívida)
+        updated = db.update_transaction(tx_exp, amount=5000, description='Farmácia Popular')
+        self.assertEqual(updated['amount'], 5000)
+        self.assertEqual(updated['description'], 'Farmácia Popular')
+        self.assertEqual(db.get_transaction(tx_inc)['amount'], 6000)
+        did = db.add_debt(3000, today_iso, 'Teste')
+        db.pay_debt(did, 3000)
+        debt_tx = db.get_transactions(1)[0]['id']
+        with self.assertRaises(ValueError):
+            db.update_transaction(debt_tx, amount=1000)
+
 
 if __name__ == '__main__':
     unittest.main()

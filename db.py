@@ -129,7 +129,27 @@ def init():
                 sent_at TEXT NOT NULL,
                 UNIQUE(debt_id, alert_type)
             );
+            CREATE TABLE IF NOT EXISTS fixed_incomes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount > 0),
+                day INTEGER NOT NULL CHECK(day BETWEEN 1 AND 30),
+                category TEXT NOT NULL DEFAULT 'Renda Fixa',
+                active INTEGER NOT NULL DEFAULT 1
+            );
         ''')
+        seeded = c.execute("SELECT value FROM preferences WHERE key='fixed_incomes_seeded'").fetchone()
+        cnt_inc = c.execute("SELECT COUNT(*) FROM fixed_incomes").fetchone()[0]
+        if not seeded and cnt_inc == 0:
+            c.executemany(
+                "INSERT INTO fixed_incomes(title, amount, day, category) VALUES(?, ?, ?, ?)",
+                [
+                    ('Sistema Joaninha baby kids', 7000, 10, 'Renda Fixa'),
+                    ('Salário (1ª parcela dia 15)', 93500, 15, 'Salário'),
+                    ('Salário (parcela fim do mês)', 83000, 30, 'Salário'),
+                ],
+            )
+            c.execute("INSERT OR IGNORE INTO preferences(key, value) VALUES('fixed_incomes_seeded', '1')")
         row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='recurring_bills'").fetchone()
         if row and ('BETWEEN 1 AND 28' in row['sql'] or 'weekday' not in row['sql']):
             c.executescript('''
@@ -303,6 +323,32 @@ def delete_transaction(tx_id):
         c.execute('DELETE FROM transactions WHERE id=?', (tx_id,))
 
 
+def update_transaction(tx_id, amount=None, category=None, description=None, occurred_date=None):
+    """Atualiza campos de um lançamento avulso. Pagamentos de dívida continuam protegidos."""
+    with conn() as c:
+        row = c.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
+        if not row:
+            raise ValueError('Lançamento não encontrado.')
+        if row['debt_id']:
+            raise ValueError('Pagamento de dívida não pode ser editado por aqui; estorne e lance novamente.')
+        new_amt = int(amount) if amount is not None else row['amount']
+        if new_amt <= 0:
+            raise ValueError('O valor precisa ser positivo.')
+        new_cat = category.strip()[:70] if category and category.strip() else row['category']
+        new_desc = description.strip()[:250] if description is not None and description.strip() else row['description']
+        new_stamp = row['occurred_at']
+        if occurred_date:
+            day = date.fromisoformat(str(occurred_date))
+            _check_date_window(day)
+            time_part = datetime.fromisoformat(row['occurred_at']).timetz().replace(tzinfo=None)
+            new_stamp = datetime.combine(day, time_part, tzinfo=TZ).isoformat()
+        c.execute(
+            'UPDATE transactions SET amount=?, category=?, description=?, occurred_at=? WHERE id=?',
+            (new_amt, new_cat, new_desc, new_stamp, tx_id),
+        )
+        return dict(c.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone())
+
+
 def refund_debt_payment(tx_id):
     """Estorna um pagamento de dívida de forma atômica, restaurando o saldo da conta."""
     with conn() as c:
@@ -359,43 +405,91 @@ def next_month(month):
     return (date(d.year+1, 1, 1) if d.month == 12 else date(d.year, d.month+1,1)).strftime('%Y-%m')
 
 
+def get_fixed_incomes(active_only=True):
+    sql = 'SELECT * FROM fixed_incomes'
+    if active_only:
+        sql += ' WHERE active=1'
+    sql += ' ORDER BY day, id'
+    with conn() as c:
+        return [dict(r) for r in c.execute(sql)]
+
+
+def add_fixed_income(title, amount, day, category='Renda Fixa'):
+    if amount <= 0 or not str(title or '').strip():
+        raise ValueError('Receita fixa inválida.')
+    if not 1 <= int(day) <= 30:
+        raise ValueError('Informe o dia do mês entre 1 e 30.')
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO preferences(key, value) VALUES('fixed_incomes_seeded', '1')")
+        return c.execute(
+            'INSERT INTO fixed_incomes(title, amount, day, category) VALUES(?, ?, ?, ?)',
+            (title.strip()[:180], int(amount), int(day), (category or 'Renda Fixa').strip()[:70]),
+        ).lastrowid
+
+
+def update_fixed_income(inc_id, new_amount):
+    if int(new_amount) <= 0:
+        raise ValueError('Valor inválido.')
+    with conn() as c:
+        r = c.execute('SELECT * FROM fixed_incomes WHERE id=?', (inc_id,)).fetchone()
+        if not r:
+            raise ValueError(f'Receita fixa #{inc_id} não encontrada.')
+        c.execute('UPDATE fixed_incomes SET amount=? WHERE id=?', (int(new_amount), inc_id))
+        return dict(r, amount=int(new_amount))
+
+
+def remove_fixed_income(inc_id):
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO preferences(key, value) VALUES('fixed_incomes_seeded', '1')")
+        if c.execute('DELETE FROM fixed_incomes WHERE id=?', (inc_id,)).rowcount == 0:
+            raise ValueError(f'Receita fixa #{inc_id} não encontrada.')
+
+
 def fixed_income_status(month):
-    """Verifica quais das 3 receitas fixas mensais (R$ 70 + R$ 935 + R$ 830 = R$ 1.835,00)
-    já entraram em `month` e quanto ainda falta receber (sem abater receitas extras avulsas)."""
-    expected = 183500
+    """Verifica quais receitas fixas cadastradas já entraram em `month` e quanto ainda falta receber
+    (sem abater receitas extras avulsas)."""
+    incomes = get_fixed_incomes(active_only=True)
+    expected = sum(i['amount'] for i in incomes)
     current = now().strftime('%Y-%m')
+
     if month < current:
-        return {'expected': expected, 'received_fixed': expected, 'remaining_fixed': 0,
-                'joaninha_ok': True, 'sal15_ok': True, 'sal30_ok': True}
+        items = [dict(i, received=True) for i in incomes]
+        return {'expected': expected, 'received_fixed': expected, 'remaining_fixed': 0, 'items': items}
     if month > current:
-        return {'expected': expected, 'received_fixed': 0, 'remaining_fixed': expected,
-                'joaninha_ok': False, 'sal15_ok': False, 'sal30_ok': False}
+        items = [dict(i, received=False) for i in incomes]
+        return {'expected': expected, 'received_fixed': 0, 'remaining_fixed': expected, 'items': items}
 
     txs = [t for t in month_transactions(month) if t['kind'] == 'receita']
-    joaninha_ok = False
-    sal15_ok = False
-    sal30_ok = False
-    for t in txs:
-        text_norm = unicodedata.normalize('NFKD', f"{t['category']} {t['description']}".lower()).encode('ascii', 'ignore').decode('ascii')
-        amt = int(t['amount'])
-        if not joaninha_ok and ('joaninha' in text_norm or amt == 7000):
-            joaninha_ok = True
-            continue
-        if not sal15_ok and (amt == 93500 or ('sal' in text_norm and ('15' in text_norm or '1' in text_norm or 88000 <= amt <= 100000))):
-            sal15_ok = True
-            continue
-        if not sal30_ok and (amt == 83000 or ('sal' in text_norm and ('30' in text_norm or 'fim' in text_norm or 'complemento' in text_norm or 75000 <= amt <= 87999))):
-            sal30_ok = True
-            continue
+    used_tx_ids = set()
+    items = []
+    received_fixed = 0
 
-    received_fixed = (7000 if joaninha_ok else 0) + (93500 if sal15_ok else 0) + (83000 if sal30_ok else 0)
+    def _norm(s):
+        return unicodedata.normalize('NFKD', str(s or '').lower()).encode('ascii', 'ignore').decode('ascii')
+
+    for inc in incomes:
+        inc_words = [w for w in re.findall(r'[a-z0-9]+', _norm(inc['title'])) if len(w) >= 3 and w not in ('parcela', 'mes', 'dia')]
+        matched = False
+        for t in txs:
+            if t['id'] in used_tx_ids:
+                continue
+            t_amt = int(t['amount'])
+            t_norm = _norm(f"{t['category']} {t['description']}")
+            same_amount = (t_amt == inc['amount'])
+            word_match = bool(inc_words and any(w in t_norm for w in inc_words) and abs(t_amt - inc['amount']) <= max(5000, int(inc['amount'] * 0.2)))
+            if same_amount or word_match:
+                matched = True
+                used_tx_ids.add(t['id'])
+                break
+        if matched:
+            received_fixed += inc['amount']
+        items.append(dict(inc, received=matched))
+
     return {
         'expected': expected,
         'received_fixed': received_fixed,
         'remaining_fixed': max(0, expected - received_fixed),
-        'joaninha_ok': joaninha_ok,
-        'sal15_ok': sal15_ok,
-        'sal30_ok': sal30_ok,
+        'items': items,
     }
 
 
@@ -918,6 +1012,6 @@ def reset_all():
     with conn() as c:
         c.execute('BEGIN IMMEDIATE')
         for table in ('debt_payments', 'debt_notifications', 'transactions', 'debts',
-                      'recurring_bills', 'reminders', 'messages', 'preferences'):
+                      'recurring_bills', 'fixed_incomes', 'reminders', 'messages', 'preferences'):
             c.execute(f'DELETE FROM {table}')
         c.execute('DELETE FROM sqlite_sequence')

@@ -319,8 +319,8 @@ async def interpret_message(prompt, pending=None):
 
 VISION_SYSTEM = (
     INTERPRETER_SYSTEM
-    + '\n\nINSTRUÇÕES ADICIONAIS PARA IMAGENS (COMPROVANTES PIX, BOLETOS, FATURAS E CUPONS):\n'
-    '- Analise a imagem enviada (e a legenda do usuário, se houver).\n'
+    + '\n\nINSTRUÇÕES ADICIONAIS PARA IMAGENS E PDFs (COMPROVANTES PIX, BOLETOS, FATURAS E CUPONS):\n'
+    '- Analise a imagem ou documento PDF enviado (e a legenda do usuário, se houver).\n'
     '- Se for um comprovante de pagamento já realizado (PIX enviado, comprovante bancário, recibo ou nota fiscal paga):\n'
     '  • Verifique se o destinatário/descrição ou valor corresponde a uma das contas em `open_debts`. Se corresponder claramente a uma conta aberta, retorne `type: "debt_payment"`, `title` com o nome da conta correspondente em `open_debts`, e `amount` com o valor pago.\n'
     '  • Caso contrário, retorne `type: "transaction"`, `kind: "despesa"` (ou `"receita"` se for um PIX recebido pelo usuário), `amount`, `category` inferida, `description` curta (ex.: nome do recebedor/estabelecimento) e `occurred_date` (se constar na imagem).\n'
