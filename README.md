@@ -104,7 +104,7 @@ A interação diária não depende de comandos. Estes continuam disponíveis com
 - `/id` — mostra o ID do Telegram no chat privado, para configurar o proprietário.
 - `/start` e `/ajuda` — apresentação e exemplos.
 - `/receita 1870 Salário | Mensal` e `/despesa 45,90 Alimentação | Almoço` — registros estruturados antigos.
-- `/saldo`, `/conta`, `/dividas`, `/pagar`, `/historico`, `/relatorio`, `/planejar`, `/lembrete`, `/lembretes`, `/apagar_lembrete`, `/modelo`, `/backup` e `/resetar` — atalhos administrativos.
+- `/saldo`, `/conta`, `/dividas`, `/pagar`, `/historico`, `/relatorio`, `/planejar`, `/lembrete`, `/lembretes`, `/apagar_lembrete`, `/modelo`, `/backup`, `/limpar_chat` e `/resetar` — atalhos administrativos.
 - `/fixa`, `/fixas` e `/excluir_fixa` — cadastro, listagem e remoção de contas fixas mensais.
 - `/apagar` e `/estornar` — remoção de lançamentos avulsos ou estorno de pagamento de dívida.
 - `/hora` — mostra o relógio e o fuso que o bot usa (confira se bate com o celular) e os próximos lembretes.
@@ -137,7 +137,7 @@ O bot envia sozinho: resumo matinal e alertas de conta a partir de `MORNING_HOUR
 - O SQLite não é criptografado por padrão. Proteja o celular e os backups.
 - O Telegram comum com bots não é um chat secreto com criptografia ponta a ponta.
 - A IA pode interpretar incorretamente uma frase. **Confira sempre a tela de confirmação antes de salvar**; nunca confirme um valor, categoria ou vencimento incorreto.
-- Não há leitura automática de áudio, imagens ou comprovantes nesta versão.
+- Leitura de comprovantes e boletos (fotos e PDFs) requer `GEMINI_API_KEY` configurada no `.env`; não há transcrição automática de áudio nesta versão.
 - Lembretes são enviados quando o bot está ativo e conectado; não são garantia de alarme se o Android encerrar o Termux.
 
 ## Arquivos

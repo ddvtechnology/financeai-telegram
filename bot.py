@@ -109,6 +109,10 @@ async def guard(update):
 
 def clean_telegram_markdown(text):
     if not text: return text
+    # Remove linhas horizontais markdown (---, ***, ___) que poluem o chat no Telegram
+    text = re.sub(r'(?m)^\s*(?:[-_*]\s*){3,}$', '', text)
+    # Converte cabeçalhos markdown (### Título) em negrito do Telegram (*Título*)
+    text = re.sub(r'(?m)^\s*#{1,6}\s+(.+?)\s*$', r'*\1*', text)
     # Converte marcadores de lista iniciados por asterisco ou traço (* item ou - item) em bullets (• item)
     text = re.sub(r'(?m)^\s*[\*\-]\s+', '• ', text)
     # Converte negrito padrão markdown (**texto**) em negrito do Telegram (*texto*)
@@ -124,7 +128,8 @@ def clean_telegram_markdown(text):
     if text.count('_') % 2 != 0:
         idx = text.rfind('_')
         text = text[:idx] + text[idx+1:]
-    return text
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def _msg(update):
@@ -329,6 +334,7 @@ async def balance(update, context):
          InlineKeyboardButton('📜 Histórico', callback_data='mn:hist:all')],
         [InlineKeyboardButton('📊 Relatório do mês', callback_data='mn:report'),
          InlineKeyboardButton('🧭 Planejamento', callback_data='mn:plan')],
+        [InlineKeyboardButton('🎯 Conferir / Ajustar saldo real', callback_data='mn:reconcile')],
     ])
     await say(update,
         f'💰 *Saldo Atual Registrado:* {db.brl(s["total"])}\n\n'
@@ -543,10 +549,111 @@ def asks_history(text):
     return 'todas'
 
 
-def direct_db_answer(text):
-    """Responde consultas simples direto do SQLite (última receita/despesa, gastos de hoje/mês), sem IA."""
-    plain = normalized(text)
-    if len(plain) > 100:
+def _parse_simulation_request(text):
+    """Extrai (amount_cents, installments, first_due_iso) de frases como
+    'Posso gastar 150 hoje?', 'Posso parcelar 300 em 3x dia 20?', 'Simular 200 em 2x 15/12'."""
+    raw = str(text or '').strip()
+    plain = normalized(raw)
+    if not re.search(r'\b(posso\s+(?:gastar|comprar|pagar|parcelar)|se\s+(?:eu\s+)?(?:gastar|comprar|parcelar)|simul\w*)\b', plain):
+        return None
+    # Procura número de parcelas (ex.: "3x", "em 3 vezes", "em 3 parcelas")
+    installments = 1
+    m_inst = re.search(r'\b(\d{1,2})\s*(?:x|vezes|parcelas?)\b', plain)
+    rest = raw
+    if m_inst:
+        installments = max(1, min(48, int(m_inst.group(1))))
+        rest = re.sub(r'\b(?:em\s+)?\d{1,2}\s*(?:x|vezes|parcelas?)\b', ' ', rest, count=1, flags=re.I)
+
+    # Procura data explícita opcional (DD/MM/AAAA, DD/MM ou "dia NN")
+    first_due = None
+    m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', rest)
+    if m_dt:
+        yr_s = m_dt.group(3) or str(db.now().year)
+        try:
+            first_due = db.parse_date(f'{int(m_dt.group(1)):02d}/{int(m_dt.group(2)):02d}/{yr_s}')
+            rest = (rest[:m_dt.start()] + ' ' + rest[m_dt.end():]).strip()
+        except ValueError:
+            first_due = None
+    else:
+        m_day = re.search(r'\bdia\s+(\d{1,2})\b', rest, re.I)
+        if m_day:
+            d_n = int(m_day.group(1))
+            if 1 <= d_n <= 30:
+                today = db.now().date()
+                cand_m = today.strftime('%Y-%m') if d_n >= today.day else db.next_month(today.strftime('%Y-%m'))
+                first_due = f'{cand_m}-{d_n:02d}'
+                rest = (rest[:m_day.start()] + ' ' + rest[m_day.end():]).strip()
+
+    # Procura valor monetário
+    m_amt = re.search(r'(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[,.]\d{1,2})?)', rest, re.I)
+    if not m_amt:
+        return None
+    try:
+        amount_cents = db.money_to_cents(m_amt.group(1))
+    except ValueError:
+        return None
+    return amount_cents, installments, first_due
+
+
+def _format_simulation_result(sim):
+    total_br = db.brl(sim['total_cents'])
+    if sim['installments'] > 1:
+        part_br = db.brl(sim['parts'][0][1])
+        head = f'🧮 *SIMULAÇÃO: {total_br} em {sim["installments"]}x de ~{part_br}*'
+    else:
+        head = f'🧮 *SIMULAÇÃO: Gasto à vista de {total_br}*'
+    if sim['safe']:
+        verdict = '✅ *Resultado:* CABE no seu fluxo cronológico sem deixar nenhum dia negativo nos próximos 4 meses!'
+    elif not sim['worsens_shortage']:
+        verdict = '⚠️ *Resultado:* O gasto não piora a falta de caixa já existente, mas seu fluxo já está apertado.'
+    else:
+        verdict = '🚨 *Resultado: ATENÇÃO!* Esse gasto deixa (ou aprofunda) o caixa NEGATIVO no meio do mês!'
+
+    lines = [head, verdict, '']
+    for m in sim['months']:
+        m_br = f'{m["month"][5:]}/{m["month"][:4]}'
+        flag = '🚨' if m['after_shortage'] > 0 else '✅'
+        lines.append(
+            f'{flag} *{m_br}:* menor saldo `{db.brl(m["after_min"])}` em `{db.short_date(m["after_min_date"])[:5]}` '
+            f'*(antes: {db.brl(m["before_min"])})* | final: `{db.brl(m["after_closing"])}`'
+        )
+    lines.append('\n*(Simulação baseada apenas em contas comprometidas + receitas previstas; nenhum lançamento foi feito.)*')
+    return '\n'.join(lines)
+
+
+def _format_day_transactions(day_iso, kind=None):
+    rows = db.get_transactions_by_date(day_iso, kind=kind)
+    day_br = db.short_date(day_iso)
+    if not rows:
+        lbl = 'pagamentos/despesas' if kind == 'despesa' else ('receitas' if kind == 'receita' else 'movimentações')
+        return f'📅 *{day_br}*: nenhuma {lbl} registrada no banco nessa data.'
+    title = (f'📅 *DESPESAS/PAGAMENTOS EM {day_br}:*' if kind == 'despesa'
+             else f'📅 *RECEITAS EM {day_br}:*' if kind == 'receita'
+             else f'📅 *MOVIMENTAÇÕES EM {day_br}:*')
+    lines = [title, '']
+    tot_in = 0
+    tot_out = 0
+    for t in rows:
+        emoji = '➕' if t['kind'] == 'receita' else '➖'
+        if t['kind'] == 'receita':
+            tot_in += t['amount']
+        else:
+            tot_out += t['amount']
+        lines.append(f'{emoji} *#{t["id"]}* `{db.brl(t["amount"])}` | {t["category"]} — {t["description"]}')
+    lines.append('')
+    if kind != 'despesa' and tot_in:
+        lines.append(f'🟢 *Total recebido:* `{db.brl(tot_in)}`')
+    if kind != 'receita' and tot_out:
+        lines.append(f'🔴 *Total gasto/pago:* `{db.brl(tot_out)}`')
+    return '\n'.join(lines)
+
+
+def direct_db_answer(text, bot_data=None):
+    """Responde consultas diretas pelo SQLite (última receita/despesa, gastos de hoje/mês e
+    extratos por data específica como 'Somente dia 09/11' ou 'oq paguei nesse dia'), sem IA."""
+    raw = str(text or '').strip()
+    plain = normalized(raw)
+    if len(plain) > 120:
         return None
 
     # 1. Última receita / última despesa / último lançamento
@@ -558,7 +665,7 @@ def direct_db_answer(text):
     if m_last:
         w = m_last.group(1)
         kind = 'receita' if w in ('receita', 'receira', 'entrada') else ('despesa' if w in ('despesa', 'gasto') else None)
-        sql = 'SELECT * FROM transactions' + (' WHERE kind=?' if kind else '') + ' ORDER BY occurred_at DESC, id DESC LIMIT 1'
+        sql = 'SELECT * FROM transactions' + (' WHERE kind=?' if kind else '') + ' ORDER BY substr(occurred_at,1,10) DESC, id DESC LIMIT 1'
         with db.conn() as c:
             row = c.execute(sql, (kind,) if kind else ()).fetchone()
         label = 'receita' if kind == 'receita' else ('despesa' if kind == 'despesa' else 'movimentação')
@@ -616,26 +723,124 @@ def direct_db_answer(text):
         verb_lbl = 'recebeu' if kind == 'receita' else 'gastou'
         term_lbl = f' com *{term.strip()}*' if term else ''
         return f'📊 Você {verb_lbl}{term_lbl} {p_label}: `{db.brl(total_amt)}` ({cnt} lançamento(s)).'
+
+    # 3. Consulta de movimentações em data específica ("Somente dia 09/11", "o que paguei dia 09/11", "o que paguei nesse dia")
+    has_money = bool(re.search(r'r\$|\b\d+[,.]\d{2}\b|\breais\b', raw, re.I))
+    has_create_intent = bool(re.search(r'\b(lembr\w*|avise|alarme|tenho uma conta|conta a pagar|vence|vencimento|cadastrar|adicionar|parcelar)\b', plain))
+    if not has_money and not has_create_intent:
+        day_iso = None
+        m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', raw)
+        is_date_query = bool(
+            re.search(r'\b(somente|so|apenas|extrato|historico|movimentac\w*|lancament\w*|gast\w*|pagu\w*|paguei|receb\w*|despes\w*|receit\w*|quero saber|o que|oq|quais|ver|mostrar|mostra)\b', plain)
+            or re.fullmatch(r'(?:dia\s+)?\d{1,2}\s+\d{1,2}(?:\s+\d{4})?', plain)
+        )
+        if m_dt and is_date_query:
+            yr_s = m_dt.group(3) or str(db.now().year)
+            try:
+                day_iso = db.parse_date(f'{int(m_dt.group(1)):02d}/{int(m_dt.group(2)):02d}/{yr_s}')
+            except ValueError:
+                day_iso = None
+        elif re.search(r'\b(nesse dia|naquele dia|desse dia|daquele dia|nesta data|nessa data)\b', plain) and bot_data:
+            saved = bot_data.get('last_queried_date')
+            if saved and db.now().timestamp() - saved[1] <= 600:
+                day_iso = saved[0]
+        elif re.search(r'\b(o que|oq|quais)\s+(?:eu\s+)?(?:paguei|gastei|recebi|movimentei|lancei)\s+(hoje|ontem)\b', plain):
+            m_rel = re.search(r'\b(hoje|ontem)\b', plain)
+            today = db.now().date()
+            day_iso = today.isoformat() if m_rel.group(1) == 'hoje' else (today - timedelta(days=1)).isoformat()
+
+        if day_iso:
+            if bot_data is not None:
+                bot_data['last_queried_date'] = (day_iso, db.now().timestamp())
+            kind = None
+            if re.search(r'\b(paguei|gastei|despes\w*|gast\w*|pagament\w*)\b', plain) and not re.search(r'\b(receb\w*|receit\w*)\b', plain):
+                kind = 'despesa'
+            elif re.search(r'\b(receb\w*|receit\w*|entrad\w*)\b', plain) and not re.search(r'\b(paguei|gastei|despes\w*|gast\w*)\b', plain):
+                kind = 'receita'
+            return _format_day_transactions(day_iso, kind=kind)
+
+    # 4. Pergunta direta se uma conta já foi paga no mês ("já paguei o celular?", "já foi pago a conta do celular esse mês?")
+    m_paid = re.search(
+        r'(?:ja\s+(?:foi\s+pag[oa]|paguei|esta\s+pag[oa]|consta\s+como\s+pag[oa])|foi\s+pag[oa])\s+(?:a\s+|o\s+)?(?:conta\s+(?:de|do|da)\s+)?(.+?)(?:\s+(?:este|esse|neste|nesse|no)\s+mes)?$',
+        plain,
+    )
+    if m_paid and not has_money:
+        term = re.sub(r'^(?:de|do|da|a|o)\s+', '', m_paid.group(1).strip())
+        if 3 <= len(term) <= 45:
+            cur_m = db.now().strftime('%Y-%m')
+            cur_br = f'{cur_m[5:]}/{cur_m[:4]}'
+            with db.conn() as c:
+                all_month_debts = [dict(r) for r in c.execute(
+                    '''SELECT d.*, MAX(dp.paid_at) AS paid_at
+                       FROM debts d LEFT JOIN debt_payments dp ON dp.debt_id = d.id
+                       WHERE substr(d.due_date,1,7)=? OR substr(dp.paid_at,1,7)=?
+                       GROUP BY d.id ORDER BY d.due_date, d.id''',
+                    (cur_m, cur_m),
+                )]
+                month_txs = [dict(r) for r in c.execute(
+                    "SELECT * FROM transactions WHERE kind='despesa' AND substr(occurred_at,1,7)=? ORDER BY occurred_at DESC",
+                    (cur_m,),
+                )]
+            matched_debts = [d for d in all_month_debts if term in normalized(d['title'])]
+            matched_txs = [t for t in month_txs if term in normalized(t['description']) or term in normalized(t['category'])]
+            if matched_debts or matched_txs:
+                lines = [f'🔎 *Status de "{term}" em {cur_br}:*\n']
+                for d in matched_debts:
+                    rem = d['original_amount'] - d['paid_amount']
+                    if rem <= 0:
+                        dt_p = db.short_date(d['paid_at']) if d.get('paid_at') else db.short_date(d['due_date'])
+                        lines.append(f'✅ *PAGA* — #{d["id"]} {d["title"]} (`{db.brl(d["original_amount"])}`, paga em `{dt_p}`)')
+                    else:
+                        lines.append(f'⏳ *EM ABERTO* — #{d["id"]} {d["title"]} (falta `{db.brl(db.monthly_due_amount(d))}`, vence `{db.short_date(d["due_date"])}`)')
+                if not matched_debts:
+                    for t in matched_txs[:5]:
+                        lines.append(f'✅ *PAGO* — #{t["id"]} {db.short_date(t["occurred_at"])} `{db.brl(t["amount"])}` | {t["category"]} — {t["description"]}')
+                return '\n'.join(lines)
+
+    # 5. Simulador determinístico ("Posso gastar 150 hoje?", "Posso parcelar 300 em 3x?")
+    sim_req = _parse_simulation_request(raw)
+    if sim_req:
+        amt_c, inst_n, first_d = sim_req
+        sim = db.simulate_purchase(amt_c, installments=inst_n, first_due_iso=first_d)
+        return _format_simulation_result(sim)
     return None
 
 
-async def history(update, context, kind=None):
-    if not await guard(update):return
-    transactions=db.get_transactions(60 if kind else 20)
-    if kind:transactions=[t for t in transactions if t['kind']==kind][:20]
-    if not transactions:await say(update,'Não há movimentações registradas.');return
-    lines=['ÚLTIMAS MOVIMENTAÇÕES:' if not kind else f'ÚLTIMAS {"DESPESAS" if kind=="despesa" else "RECEITAS"}:']
+async def history(update, context, kind=None, page=0):
+    if not await guard(update): return
+    page = max(0, int(page or 0))
+    per_page = 15
+    rows = db.get_transactions(limit=per_page + 1, offset=page * per_page, kind=kind)
+    has_next = len(rows) > per_page
+    transactions = rows[:per_page]
+    if not transactions:
+        await say(update, 'Não há movimentações registradas.' if page == 0 else 'Não há lançamentos mais antigos.')
+        return
+    page_tag = f' (pág. {page + 1})' if page > 0 else ''
+    head = (f'ÚLTIMAS {"DESPESAS" if kind == "despesa" else "RECEITAS"}{page_tag}:'
+            if kind else f'ÚLTIMAS MOVIMENTAÇÕES{page_tag}:')
+    lines = [head]
     for t in transactions:
-        emoji='➕' if t['kind']=='receita' else '➖'
+        emoji = '➕' if t['kind'] == 'receita' else '➖'
         lines.append(f'{emoji} #{t["id"]} {db.short_date(t["occurred_at"])} {db.brl(t["amount"])} | {t["category"]} | {t["description"]}\n')
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton('📋 Todas', callback_data='mn:hist:all'),
-         InlineKeyboardButton('🟢 Receitas', callback_data='mn:hist:receita'),
-         InlineKeyboardButton('🔴 Despesas', callback_data='mn:hist:despesa')],
-        [InlineKeyboardButton('✏️ Editar lançamento', callback_data='mn:txedit_list'),
-         InlineKeyboardButton('🗑️ Apagar ou Estornar', callback_data='mn:txdel_list')],
+    k_str = kind or 'all'
+    kb_rows = [
+        [InlineKeyboardButton('📋 Todas', callback_data='mn:hist:all:0'),
+         InlineKeyboardButton('🟢 Receitas', callback_data='mn:hist:receita:0'),
+         InlineKeyboardButton('🔴 Despesas', callback_data='mn:hist:despesa:0')],
+    ]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton('⬅️ Mais recentes', callback_data=f'mn:hist:{k_str}:{page - 1}'))
+    if has_next:
+        nav.append(InlineKeyboardButton('Mais antigos ➡️', callback_data=f'mn:hist:{k_str}:{page + 1}'))
+    if nav:
+        kb_rows.append(nav)
+    kb_rows.append([
+        InlineKeyboardButton('✏️ Editar lançamento', callback_data='mn:txedit_list'),
+        InlineKeyboardButton('🗑️ Apagar ou Estornar', callback_data='mn:txdel_list'),
     ])
-    await say(update, '\n'.join(lines), keyboard=kb)
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(kb_rows))
 
 
 async def report(update, context, month=None):
@@ -666,10 +871,12 @@ async def plan(update, context, month=None):
     if not await guard(update): return
     p = db.planning()
     debt_months = db.get_debt_months()
-    target_m = month or (p['month'] if p['due_remaining_month'] > 0 else (debt_months[0] if debt_months else p['month']))
-    cp = db.cumulative_planning(target_m)
+    cp = db.cumulative_planning(month)
+    target_m = cp['month']
     m_br = f'{target_m[5:]}/{target_m[:4]}'
+    cur_br = f'{p["month"][5:]}/{p["month"][:4]}'
     inc = cp['income_info']
+    bd = cp['breakdown']
     expected_income_m = inc['expected']
     remaining_income_m = inc['remaining_fixed']
     received_fixed_m = inc['received_fixed']
@@ -680,9 +887,20 @@ async def plan(update, context, month=None):
         income_lines.append(f'  • Dia {item["day"]:02d}: `{db.brl(item["amount"])}` ({item["title"]}){tag}')
     if not inc.get('items'):
         income_lines.append('  • Nenhuma receita fixa cadastrada.')
-    if target_m == p['month'] and received_fixed_m > 0:
-        income_lines.append(f'  • *Já recebido das fixas em {m_br}:* `{db.brl(received_fixed_m)}` (já no caixa)')
-        income_lines.append(f'  • *Falta entrar em {m_br}:* `{db.brl(remaining_income_m)}`')
+    if target_m == p['month']:
+        if inc.get('received_extra', 0) > 0:
+            income_lines.append(f'  • *Ganhos extras/avulsos em {m_br}:* `{db.brl(inc["received_extra"])}` (já no caixa)')
+        if received_fixed_m > 0:
+            income_lines.append(f'  • *Falta entrar (fixas) em {m_br}:* `{db.brl(remaining_income_m)}`')
+
+    exp_extra_items = cp.get('expected_extra_items', [])
+    exp_extra_total = cp.get('expected_extra_total', 0)
+    if exp_extra_items:
+        income_lines.append(f'📥 *Receitas Pontuais a Receber em {m_br}:* `{db.brl(exp_extra_total)}`')
+        for e in exp_extra_items:
+            income_lines.append(f'  • {db.short_date(e["expected_date"])[:5]}: `{db.brl(e["amount"])}` ({e["title"]})')
+
+    total_incoming_m = remaining_income_m + exp_extra_total
 
     opening_label = (
         f'💰 *Saldo inicial projetado em {m_br} (vindo do mês anterior):* `{db.brl(cp["opening_balance"])}`'
@@ -691,36 +909,144 @@ async def plan(update, context, month=None):
     )
 
     detail_lines = [
-        f'📊 *Detalhamento de Contas — {m_br}:*',
+        f'📊 *Contas Comprometidas — {m_br}:*',
         f'• *1ª Quinzena (dias 01 a 15):* `{db.brl(cp["q1_total"])}` ({len(cp["q1_items"])} contas)',
         f'• *2ª Quinzena (dias 16 a 31):* `{db.brl(cp["q2_total"])}` ({len(cp["q2_items"])} contas)',
     ]
     if cp['projected_fixed_total'] > 0:
         detail_lines.append(f'  ↳ *Parcelas já lançadas em {m_br}:* `{db.brl(cp["registered_total"])}`')
         detail_lines.append(f'  ↳ *Contas fixas + Perfumes/Roupas do mês:* `{db.brl(cp["projected_fixed_total"])}`')
-    detail_lines.append(f'• *Total a pagar no mês ({m_br}):* `{db.brl(cp["flow_total"])}`')
+    detail_lines.append(f'• *Total de contas em {m_br}:* `{db.brl(cp["flow_total"])}`')
+
+    # Bloco cronológico intrames (ponto crítico antes dos recebimentos)
+    min_dt_br = db.short_date(cp['min_balance_date'])
+    cashflow_lines = [f'\n📆 *Fluxo de Caixa no Meio do Mês ({m_br}):*']
+    if target_m > p['month'] or db.now().day <= 14:
+        cashflow_lines.append(f'• *Antes do salário (até dia 14):* `{db.brl(cp["before_day15_balance"])}`')
+    if cp['shortage'] > 0:
+        extra_neg = [f'`{db.short_date(dt)[:5]}` ({db.brl(b)})' for dt, b in cp.get('negative_days', []) if dt != cp['min_balance_date']][:3]
+        more_txt = f'\n   Outros dias no vermelho: {", ".join(extra_neg)}' if extra_neg else ''
+        cashflow_lines.append(
+            f'🚨 *ALERTA DE IMPREVISTO:* em `{min_dt_br}` o caixa previsto cai para `{db.brl(cp["min_balance"])}`!{more_txt}\n'
+            f'   Você precisará de pelo menos `{db.brl(cp["shortage"])}` extras antes dessa data para não ficar negativo.'
+        )
+    else:
+        cashflow_lines.append(f'• *Menor saldo previsto no mês:* `{db.brl(cp["min_balance"])}` (em `{min_dt_br}`)')
+
+    # Alerta antecipado de virada para o mês seguinte
+    if cp.get('next_month') and cp.get('next_month_shortage', 0) > 0:
+        nm_br = f'{cp["next_month"][5:]}/{cp["next_month"][:4]}'
+        cashflow_lines.append(
+            f'⚠️ *Atenção p/ virada de {nm_br}:* com esse saldo final, o caixa fica `{db.brl(cp["next_month_min_balance"])}` '
+            f'em `{db.short_date(cp["next_month_min_date"])}` antes do salário de {nm_br}! Reserve `{db.brl(cp["next_month_shortage"])}`.'
+        )
+
+    # Impacto dos gastos avulsos/variáveis (orçamento definido pelo usuário + ritmo real)
+    var_lines = []
+    v_budget = cp.get('variable_budget', 0)
+    if v_budget > 0 or bd['variable_expense_total'] > 0 or bd['daily_variable_avg'] > 0:
+        var_lines.append('\n🧾 *Gastos Avulsos/Variáveis (fora das contas fixas):*')
+        if v_budget > 0:
+            if target_m == p['month']:
+                rem_b = max(0, v_budget - bd['variable_expense_total'])
+                pct_b = round((bd['variable_expense_total'] / v_budget) * 100)
+                var_lines.append(
+                    f'• *Orçamento mensal definido:* `{db.brl(v_budget)}` '
+                    f'*(usado em {cur_br}: {db.brl(bd["variable_expense_total"])} = {pct_b}%, resta {db.brl(rem_b)})*'
+                )
+            else:
+                var_lines.append(f'• *Orçamento mensal definido:* `{db.brl(v_budget)}/mês`')
+            p_flag = '🚨' if cp.get('prudent_shortage', 0) > 0 else '✅'
+            var_lines.append(
+                f'{p_flag} *Com orçamento de avulsos em {m_br}:* menor saldo `{db.brl(cp["prudent_min_balance"])}` '
+                f'em `{db.short_date(cp["prudent_min_date"])[:5]}` | final: `{db.brl(cp["prudent_closing_balance"])}`'
+            )
+        else:
+            var_lines.append(
+                f'• *Em {cur_br}:* `{db.brl(bd["variable_expense_total"])}` '
+                f'(ritmo real: `{db.brl(bd["daily_variable_avg"])}/dia` ≈ `{db.brl(bd["monthly_variable_pace"])}/mês`)'
+            )
+            if target_m == p['month'] and bd['remaining_days'] > 0:
+                floor_candidates = [cp['closing_balance'], cp['min_balance']]
+                if cp.get('next_month_min_balance') is not None:
+                    floor_candidates.append(cp['next_month_min_balance'])
+                safe_pool = max(0, min(floor_candidates))
+                safe_daily = safe_pool // bd['remaining_days']
+                est_rest = bd['daily_variable_avg'] * bd['remaining_days']
+                var_lines.append(f'• *Se mantiver o ritmo nos próximos {bd["remaining_days"]} dias (~{db.brl(est_rest)}):* saldo final cai para `{db.brl(cp["closing_balance"] - est_rest)}`')
+                var_lines.append(f'• *Limite diário seguro (sem estourar {m_br} nem o início do próximo mês):* `{db.brl(safe_daily)}/dia`')
+            elif target_m > p['month']:
+                prudent_end = cp['closing_balance'] - bd['monthly_variable_pace']
+                var_lines.append(f'• *Cenário prudente (descontando ritmo atual de avulsos):* `{db.brl(prudent_end)}`')
 
     lines = [
         f'🧭 *PLANEJAMENTO FINANCEIRO ({m_br})*\n',
         f'💰 *Caixa real de hoje:* `{db.brl(p["balance"])}`',
-        f'🟢 *Recebido em {p["month"][5:]}/{p["month"][:4]}:* `{db.brl(p["income_month"])}` | 🔴 *Gasto:* `{db.brl(p["spent_month"])}`\n',
+        f'🟢 *Entradas reais em {cur_br}:* `{db.brl(p["income_month"])}` | 🔴 *Saídas reais:* `{db.brl(p["spent_month"])}`',
+        f'  ↳ *Contas pagas:* `{db.brl(bd["debt_paid_total"])}` | *Gastos avulsos:* `{db.brl(bd["variable_expense_total"])}`\n',
         opening_label,
         *income_lines,
         '',
         *detail_lines,
-        f'\n✅ *Saldo livre projetado ao final de {m_br}:* `{db.brl(cp["closing_balance"])}`'
-        f'\n  *({db.brl(cp["opening_balance"])} inicial + {db.brl(remaining_income_m)} a receber − {db.brl(cp["flow_total"])} contas)*',
+        *cashflow_lines,
+        f'\n✅ *Saldo ao final de {m_br} (só contas comprometidas):* `{db.brl(cp["closing_balance"])}`'
+        f'\n  *({db.brl(cp["opening_balance"])} inicial + {db.brl(total_incoming_m)} a entrar − {db.brl(cp["flow_total"])} contas)*',
+        *var_lines,
     ]
 
+    plan_months = sorted({cp['start_m'], *debt_months[:3]})[:3]
     m_buttons = [
         InlineKeyboardButton(f'{"🔘 " if m == target_m else "📅 "}{m[5:]}/{m[:4]}', callback_data=f'mn:plan:{m}')
-        for m in debt_months[:3]
+        for m in plan_months
     ]
     kb_rows = []
     if m_buttons:
         kb_rows.append(m_buttons)
-    kb_rows.append([InlineKeyboardButton(f'📅 Ver contas de {m_br}', callback_data=f'mn:debts:{target_m}')])
+    kb_rows.append([
+        InlineKeyboardButton(f'📆 Fluxo dia a dia ({m_br})', callback_data=f'mn:plan_days:{target_m}'),
+        InlineKeyboardButton(f'📅 Contas de {m_br}', callback_data=f'mn:debts:{target_m}'),
+    ])
+    kb_rows.append([
+        InlineKeyboardButton('🧮 Simular gasto', callback_data='mn:sim_spend'),
+        InlineKeyboardButton('🎯 Meta gastos avulsos', callback_data='mn:set_budget'),
+    ])
+    kb_rows.append([InlineKeyboardButton('📥 Receitas a receber (pontuais)', callback_data='mn:exp_list')])
     await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(kb_rows))
+
+
+async def plan_timeline(update, context, month=None):
+    """Exibe a simulação cronológica dia a dia (entradas, saídas e saldo do dia) para evitar imprevistos."""
+    if not await guard(update): return
+    cp = db.cumulative_planning(month)
+    m_br = f'{cp["month"][5:]}/{cp["month"][:4]}'
+    lines = [
+        f'📆 *FLUXO DE CAIXA DIA A DIA — {m_br}*\n',
+        f'💰 *Saldo inicial:* `{db.brl(cp["opening_balance"])}`\n',
+    ]
+    if not cp['timeline']:
+        lines.append('Nenhuma movimentação prevista para este mês.')
+    else:
+        for day_ev in cp['timeline']:
+            dt_br = db.short_date(day_ev['date'])[:5]
+            parts = []
+            for kind, amt, lbl in day_ev['events']:
+                sign = '🟢 +' if kind == 'in' else '🔴 -'
+                parts.append(f'{sign}{db.brl(amt)} ({lbl[:22]})')
+            flag = ' 🚨' if day_ev['balance'] < 0 else ''
+            lines.append(f'• *{dt_br}*: ' + ', '.join(parts) + f'\n  ↳ Saldo: `{db.brl(day_ev["balance"])}`{flag}')
+    lines.append(f'\n📉 *Menor saldo do mês:* `{db.brl(cp["min_balance"])}` (em `{db.short_date(cp["min_balance_date"])}`)')
+    lines.append(f'✅ *Saldo final projetado:* `{db.brl(cp["closing_balance"])}`')
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(f'⬅️ Voltar ao Planejamento ({m_br})', callback_data=f'mn:plan:{cp["month"]}')]])
+    await say(update, '\n'.join(lines), keyboard=kb)
+
+
+async def clear_chat_cmd(update, context):
+    if not await guard(update): return
+    db.clear_messages()
+    context.application.bot_data.get('natural_drafts', {}).pop(update.effective_user.id, None)
+    context.application.bot_data.get('edit_debt_state', {}).pop(update.effective_user.id, None)
+    context.application.bot_data.pop('last_queried_date', None)
+    await say(update, '🧹 Memória de conversa da IA limpa! Seus lançamentos e contas continuam intactos.')
 
 
 async def clock_cmd(update, context):
@@ -903,6 +1229,32 @@ async def fixed_income_list(update, context):
     await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons))
 
 
+async def expected_income_list(update, context):
+    if not await guard(update): return
+    rows = db.get_expected_incomes(pending_only=True)
+    if not rows:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton('➕ Nova receita a receber', callback_data='mn:new_exp')]])
+        await say(
+            update,
+            '📥 *Receitas Pontuais a Receber*\n\n'
+            'Nenhuma receita futura pontual cadastrada (ex.: 13º salário, serviço fechado, reembolso).\n'
+            'Toque abaixo para agendar uma entrada no seu planejamento:',
+            keyboard=kb,
+        )
+        return
+    total = sum(r['amount'] for r in rows)
+    lines = [f'📥 *RECEITAS PONTUAIS A RECEBER (Total: {db.brl(total)}):*\n']
+    buttons = []
+    for r in rows:
+        lines.append(f'• *#{r["id"]} {r["title"]}* — `{db.brl(r["amount"])}` (previsto `{db.short_date(r["expected_date"])}`)')
+        buttons.append([
+            InlineKeyboardButton(f'✅ Já recebi #{r["id"]} ({r["title"][:12]})', callback_data=f'mn:exprec:{r["id"]}'),
+            InlineKeyboardButton(f'🗑️ Excluir #{r["id"]}', callback_data=f'mn:expdel:{r["id"]}'),
+        ])
+    buttons.append([InlineKeyboardButton('➕ Nova receita a receber', callback_data='mn:new_exp')])
+    await say(update, '\n'.join(lines), keyboard=InlineKeyboardMarkup(buttons))
+
+
 def menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('💳 Pagar conta em aberto', callback_data='mn:paylist:0'),
@@ -911,6 +1263,10 @@ def menu_keyboard():
          InlineKeyboardButton('🗑️ Excluir conta', callback_data='mn:deldebt_list:0')],
         [InlineKeyboardButton('🔁 Contas fixas', callback_data='mn:rec_list'),
          InlineKeyboardButton('🟢 Receitas fixas', callback_data='mn:inc_list')],
+        [InlineKeyboardButton('📥 Receitas a receber', callback_data='mn:exp_list'),
+         InlineKeyboardButton('🧮 Simular gasto', callback_data='mn:sim_spend')],
+        [InlineKeyboardButton('🎯 Conferir saldo real', callback_data='mn:reconcile'),
+         InlineKeyboardButton('🎯 Meta gastos avulsos', callback_data='mn:set_budget')],
         [InlineKeyboardButton('⏰ Lembretes', callback_data='mn:rem_list'),
          InlineKeyboardButton('✏️ Editar lançamento', callback_data='mn:txedit_list')],
         [InlineKeyboardButton('📜 Apagar/Estornar lançamento', callback_data='mn:txdel_list'),
@@ -919,7 +1275,8 @@ def menu_keyboard():
          InlineKeyboardButton('🗄️ Baixar Backup', callback_data='mn:backup')],
         [InlineKeyboardButton('🕒 Relógio do Bot', callback_data='mn:clock'),
          InlineKeyboardButton('🔋 Bateria do Celular', callback_data='mn:battery')],
-        [InlineKeyboardButton('❓ Ajuda', callback_data='mn:help')],
+        [InlineKeyboardButton('🧹 Limpar memória IA', callback_data='mn:clear_chat'),
+         InlineKeyboardButton('❓ Ajuda', callback_data='mn:help')],
     ])
 
 
@@ -949,6 +1306,8 @@ async def menu_callback(update, context):
         await recurring_list(update, context)
     elif cmd == 'inc_list':
         await fixed_income_list(update, context)
+    elif cmd == 'exp_list':
+        await expected_income_list(update, context)
     elif cmd == 'rem_list':
         await reminder_list(update, context)
     elif cmd == 'report' or cmd == 'rep':
@@ -962,6 +1321,10 @@ async def menu_callback(update, context):
             await say(update, f'Não há movimentações registradas em {month[5:]}/{month[:4]} para gerar planilha.')
     elif cmd == 'plan':
         await plan(update, context, month=arg)
+    elif cmd == 'plan_days':
+        await plan_timeline(update, context, month=arg)
+    elif cmd == 'clear_chat':
+        await clear_chat_cmd(update, context)
     elif cmd == 'qinc_id':
         inc_id = int(arg)
         inc = next((r for r in db.get_fixed_incomes() if r['id'] == inc_id), None)
@@ -973,21 +1336,6 @@ async def menu_callback(update, context):
         await ask_action_confirmation(
             update, context, action,
             f'Confira antes de registrar:\n\nTipo: Receita\nValor: {db.brl(inc["amount"])}\nCategoria: {inc["category"]}\nDescrição: {inc["title"]}\n\nPosso salvar no seu histórico financeiro?'
-        )
-    elif cmd == 'qinc':
-        presets = {
-            'sal15': (93500, 'Salário', 'Salário (1ª parcela dia 15)'),
-            'sal30': (83000, 'Salário', 'Salário (parcela fim do mês)'),
-            'joaninha': (7000, 'Renda Fixa', 'Sistema Joaninha baby kids'),
-        }
-        amount, cat, desc = presets.get(arg, (0, 'Receita', 'Receita'))
-        if amount <= 0:
-            return
-        action = {'type': 'transaction', 'kind': 'receita', 'amount': amount,
-                  'category': cat, 'description': desc, 'occurred_date': None}
-        await ask_action_confirmation(
-            update, context, action,
-            f'Confira antes de registrar:\n\nTipo: Receita\nValor: {db.brl(amount)}\nCategoria: {cat}\nDescrição: {desc}\n\nPosso salvar no seu histórico financeiro?'
         )
     elif cmd == 'qexp':
         presets = {
@@ -1010,13 +1358,12 @@ async def menu_callback(update, context):
         await clock_cmd(update, context)
     elif cmd == 'battery':
         await battery_cmd(update, context)
-    elif cmd == 'reset':
-        await reset_db_cmd(update, context)
     elif cmd == 'help':
         await help_cmd(update, context)
     elif cmd == 'hist':
         kind = None if arg in (None, 'all') else arg
-        await history(update, context, kind)
+        page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+        await history(update, context, kind, page=page)
     elif cmd == 'paylist':
         page = int(arg or 0)
         debts = db.get_debts()
@@ -1144,18 +1491,39 @@ async def menu_callback(update, context):
         buttons = [
             [InlineKeyboardButton(f'📅 +1 dia ({db.short_date(d_plus1)[:5]})', callback_data=f'mn:editdate:{debt_id}:{d_plus1}'),
              InlineKeyboardButton(f'📅 +5 dias ({db.short_date(d_plus5)[:5]})', callback_data=f'mn:editdate:{debt_id}:{d_plus5}')],
-            [InlineKeyboardButton(f'📅 +7 dias ({db.short_date(d_plus7)[:5]})', callback_data=f'mn:editdate:{debt_id}:{d_plus7}')],
+            [InlineKeyboardButton(f'📅 +7 dias ({db.short_date(d_plus7)[:5]})', callback_data=f'mn:editdate:{debt_id}:{d_plus7}'),
+             InlineKeyboardButton('🎚️ Teto mensal (R$/mês)', callback_data=f'mn:editcap:{debt_id}')],
         ]
+        cap_cur = db.monthly_due_amount(d)
+        cap_line = f'\n• Teto mensal atual: `{db.brl(cap_cur)}/mês`' if cap_cur < rem else ''
         await say(
             update,
             f'✏️ *Editando Conta #{d["id"]}: {d["title"]}*\n'
             f'• Vencimento atual: `{db.short_date(d["due_date"])}`\n'
-            f'• Valor restante: `{db.brl(rem)}`\n\n'
-            'Toque em um botão rápido de data abaixo **ou digite no chat**:\n'
+            f'• Valor restante: `{db.brl(rem)}`{cap_line}\n\n'
+            'Toque em um botão abaixo **ou digite no chat**:\n'
             '• Só o novo valor (ex.: `20,00`)\n'
             '• Só a nova data (ex.: `15/11/2026` ou `15/11`)\n'
             '• Ou valor e data juntos (ex.: `20,00 15/11/2026`)',
             keyboard=InlineKeyboardMarkup(buttons)
+        )
+    elif cmd == 'editcap':
+        debt_id = int(arg)
+        d = next((row for row in db.get_debts() if row['id'] == debt_id), None)
+        if not d:
+            await say(update, 'Conta não encontrada.')
+            return
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'cap_debt_id': debt_id,
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            f'🎚️ *Teto Mensal da Conta #{d["id"]}: {d["title"]}*\n'
+            f'• Saldo restante total: `{db.brl(d["original_amount"] - d["paid_amount"])}`\n\n'
+            'Digite quanto você paga **por mês** nessa dívida (ex.: `100,00` ou `150,00`),\n'
+            'ou digite `0` para remover o teto e cobrar o valor integral.\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
         )
     elif cmd == 'recedit':
         rec_id = int(arg)
@@ -1394,6 +1762,85 @@ async def menu_callback(update, context):
             '• Ex.: `Amanhã às 14:00 Transferir PIX`\n\n'
             '*(Ou envie `cancelar` para desistir)*'
         )
+    elif cmd == 'new_exp':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'new_exp',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '📥 *Nova Receita Pontual a Receber*\n\n'
+            'Digite no chat a **descrição**, **valor** e **data prevista**:\n'
+            '• Ex.: `13º Salário 800,00 30/11/2026`\n'
+            '• Ex.: `Design Cliente 150,00 05/12`\n\n'
+            '*(Ela entrará automaticamente no fluxo cronológico dessa data; digite `cancelar` para desistir)*'
+        )
+    elif cmd == 'exprec':
+        exp_id = int(arg)
+        exp = next((e for e in db.get_expected_incomes(pending_only=True) if e['id'] == exp_id), None)
+        if not exp:
+            await say(update, 'Receita a receber não encontrada ou já confirmada.')
+            return
+        action = {'type': 'expected_income_receive', 'exp_id': exp_id, 'title': exp['title'], 'amount': exp['amount']}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Confirmar recebimento de “{exp["title"]}”?\n\n'
+            f'Valor: {db.brl(exp["amount"])}\nCategoria: {exp["category"]}\n\n'
+            'Isso registrará a receita hoje e removerá da lista de a receber.'
+        )
+    elif cmd == 'expdel':
+        exp_id = int(arg)
+        exp = next((e for e in db.get_expected_incomes(pending_only=True) if e['id'] == exp_id), None)
+        if not exp:
+            await say(update, 'Receita a receber não encontrada.')
+            return
+        action = {'type': 'expected_income_delete', 'exp_id': exp_id, 'title': exp['title']}
+        await ask_action_confirmation(
+            update, context, action,
+            f'Excluir a receita prevista #{exp_id} ({exp["title"]} — {db.brl(exp["amount"])})?'
+        )
+    elif cmd == 'set_budget':
+        cur_b = db.get_variable_budget()
+        cur_txt = f'`{db.brl(cur_b)}/mês`' if cur_b > 0 else '_não definido (usando ritmo real)_'
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'set_budget',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            f'🎯 *Meta Mensal de Gastos Avulsos/Variáveis*\n'
+            f'• Atual: {cur_txt}\n\n'
+            'Digite o teto mensal que você deseja reservar para gastos livres do dia a dia '
+            '(alimentação, lazer, farmácia, etc.):\n'
+            '• Ex.: `400,00` (ou `0` para desativar e usar apenas o ritmo real)\n\n'
+            '*(Ou envie `cancelar` para desistir)*'
+        )
+    elif cmd == 'reconcile':
+        cur_bal = db.summary()['total']
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'reconcile',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            f'🎯 *Conferir / Ajustar Saldo Real*\n'
+            f'• Saldo atual no FinanceAI: `{db.brl(cur_bal)}`\n\n'
+            'Digite quanto você tem **realmente hoje** no banco + carteira (ex.: `1250,40`):\n'
+            '*(Vou calcular a diferença exata e pedir confirmação antes de lançar o ajuste)*'
+        )
+    elif cmd == 'sim_spend':
+        context.application.bot_data.setdefault('edit_debt_state', {})[update.effective_user.id] = {
+            'mode': 'sim_spend',
+            'updated_at': db.now().timestamp(),
+        }
+        await say(
+            update,
+            '🧮 *Simulador de Gasto / Parcelamento*\n\n'
+            'Digite o valor que deseja simular (à vista ou parcelado):\n'
+            '• À vista: `150` ou `85,50`\n'
+            '• Parcelado: `300 em 3x` ou `400 em 4x dia 20`\n\n'
+            '*(Nenhum lançamento é feito — só testa se algum mês fica negativo!)*'
+        )
 
 
 TYPING_INTERVAL = 4
@@ -1469,7 +1916,10 @@ async def _chat(update, context):
             [InlineKeyboardButton(f'🟢 {inc["title"][:24]} ({db.brl(inc["amount"])})', callback_data=f'mn:qinc_id:{inc["id"]}')]
             for inc in fixed_list
         ]
-        inc_buttons.append([InlineKeyboardButton('⚙️ Gerenciar receitas fixas', callback_data='mn:inc_list')])
+        inc_buttons.append([
+            InlineKeyboardButton('📥 Receitas a receber', callback_data='mn:exp_list'),
+            InlineKeyboardButton('⚙️ Receitas fixas', callback_data='mn:inc_list'),
+        ])
         kb = InlineKeyboardMarkup(inc_buttons)
         await say(
             update,
@@ -1515,10 +1965,6 @@ async def _chat(update, context):
     wanted = asks_history(prompt)
     if wanted:
         await history(update, context, None if wanted == 'todas' else wanted); return
-
-    direct_ans = direct_db_answer(prompt)
-    if direct_ans:
-        await say(update, direct_ans); return
 
     user_id = update.effective_user.id
     edit_states = context.application.bot_data.setdefault('edit_debt_state', {})
@@ -1731,6 +2177,118 @@ async def _chat(update, context):
                     await say(update, f'Data inválida: {exc}')
                     return
             prompt = f'Me lembra: {prompt}'
+        elif mode_state == 'new_exp':
+            rest = prompt
+            m_dt = re.search(r'\b(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\b', rest)
+            exp_iso = None
+            if m_dt:
+                day_s, mon_s, yr_s = m_dt.group(1), m_dt.group(2), m_dt.group(3) or str(db.now().year)
+                try:
+                    exp_iso = db.parse_date(f'{int(day_s):02d}/{int(mon_s):02d}/{yr_s}')
+                except ValueError as exc:
+                    await say(update, f'Data inválida: {exc}. Use DD/MM/AAAA.')
+                    return
+                rest = (rest[:m_dt.start()] + ' ' + rest[m_dt.end():]).strip()
+            amt_tokens = [t for t in rest.split() if re.search(r'\d', t)]
+            if exp_iso and amt_tokens:
+                try:
+                    amt_str = amt_tokens[-1]
+                    amount = db.money_to_cents(amt_str)
+                    title = rest.replace(amt_str, '', 1).replace('R$', '').strip(' -–—')
+                    if title:
+                        edit_states.pop(user_id, None)
+                        cat = 'Salário' if any(w in normalized(title) for w in ('13', 'decimo', 'ferias', 'sal')) else 'Renda Extra'
+                        action = {'type': 'expected_income_add', 'title': title, 'amount': amount, 'expected_date': exp_iso, 'category': cat}
+                        await ask_action_confirmation(
+                            update, context, action,
+                            f'Agendar receita pontual a receber?\n\nDescrição: {title}\nValor: {db.brl(amount)}\nData prevista: {db.short_date(exp_iso)}'
+                        )
+                        return
+                except ValueError as exc:
+                    await say(update, f'Dados inválidos: {exc}')
+                    return
+            await say(update, 'Informe descrição, valor e data. Exemplo: `13º Salário 800,00 30/11/2026`')
+            return
+        elif mode_state == 'set_budget':
+            raw_b = prompt.strip().replace('R$', '').replace(' ', '')
+            if raw_b in ('0', '0,00', '0.00'):
+                edit_states.pop(user_id, None)
+                db.set_variable_budget(0)
+                await say(update, '✅ Meta de gastos avulsos desativada. O planejamento voltará a exibir apenas o ritmo real.')
+                return
+            try:
+                tokens = [t for t in prompt.split() if re.search(r'\d', t)]
+                cents = db.money_to_cents(tokens[-1] if tokens else prompt)
+                edit_states.pop(user_id, None)
+                db.set_variable_budget(cents)
+                await say(update, f'✅ Meta mensal de gastos avulsos definida em `{db.brl(cents)}/mês`! Já está ativa no seu *🧭 Planejamento*.')
+                return
+            except ValueError as exc:
+                await say(update, f'Valor inválido: {exc}. Digite o valor mensal (ex.: `400,00`) ou `0` para desativar.')
+                return
+        elif mode_state == 'reconcile':
+            try:
+                raw_s = prompt.strip().replace('R$', '').replace(' ', '')
+                if raw_s in ('0', '0,00', '0.00'):
+                    real_cents = 0
+                else:
+                    tokens = [t for t in prompt.split() if re.search(r'\d', t)]
+                    real_cents = db.money_to_cents(tokens[-1] if tokens else prompt)
+                edit_states.pop(user_id, None)
+                cur_bal = db.summary()['total']
+                diff = real_cents - cur_bal
+                if diff == 0:
+                    await say(update, f'✅ Seu saldo no FinanceAI (`{db.brl(cur_bal)}`) já está **100% igual** ao saldo real informado!')
+                    return
+                kind = 'receita' if diff > 0 else 'despesa'
+                amt = abs(diff)
+                action = {'type': 'transaction', 'kind': kind, 'amount': amt,
+                          'category': 'Ajuste', 'description': 'Ajuste de Saldo', 'occurred_date': None}
+                await ask_action_confirmation(
+                    update, context, action,
+                    f'🎯 Conferência de Saldo:\n\n'
+                    f'• No FinanceAI: {db.brl(cur_bal)}\n'
+                    f'• Saldo real informado: {db.brl(real_cents)}\n'
+                    f'• Diferença: {"+" if diff > 0 else "-"}{db.brl(amt)}\n\n'
+                    f'Posso lançar uma {kind} de {db.brl(amt)} (Ajuste de Saldo) para igualar?'
+                )
+                return
+            except ValueError as exc:
+                await say(update, f'Valor inválido: {exc}. Digite seu saldo real (ex.: `1250,40`).')
+                return
+        elif mode_state == 'sim_spend':
+            edit_states.pop(user_id, None)
+            sim_req = _parse_simulation_request(f'simular {prompt}')
+            if not sim_req:
+                await say(update, 'Não entendi o valor. Tente algo como `150` ou `300 em 3x dia 20`.')
+                return
+            sim = db.simulate_purchase(sim_req[0], installments=sim_req[1], first_due_iso=sim_req[2])
+            await say(update, _format_simulation_result(sim))
+            return
+        elif 'cap_debt_id' in edit_state:
+            debt_id = edit_state['cap_debt_id']
+            d = next((row for row in db.get_debts() if row['id'] == debt_id), None)
+            if not d:
+                edit_states.pop(user_id, None)
+                await say(update, 'Conta não encontrada.')
+                return
+            raw_c = prompt.strip().replace('R$', '').replace(' ', '')
+            if raw_c in ('0', '0,00', '0.00'):
+                cap_cents = 0
+            else:
+                try:
+                    tokens = [t for t in prompt.split() if re.search(r'\d', t)]
+                    cap_cents = db.money_to_cents(tokens[-1] if tokens else prompt)
+                except ValueError as exc:
+                    await say(update, f'Valor inválido: {exc}. Digite o valor mensal (ex.: `100,00`) ou `0` para remover o teto.')
+                    return
+            edit_states.pop(user_id, None)
+            action = {'type': 'debt_set_cap', 'debt_id': debt_id, 'title': d['title'], 'cap_cents': cap_cents}
+            msg_cap = (f'Remover o teto mensal de “{d["title"]}” (passar a cobrar o saldo integral)?'
+                       if cap_cents == 0
+                       else f'Definir teto mensal de {db.brl(cap_cents)}/mês para “{d["title"]}”?')
+            await ask_action_confirmation(update, context, action, msg_cap)
+            return
         elif mode_state == 'new_inc':
             rest = prompt
             day_val = None
@@ -1901,6 +2459,11 @@ async def _chat(update, context):
         await say(update, 'Tudo bem, cancelei a operação pendente. Nenhum registro foi feito.')
         return
 
+    if not previous:
+        direct_ans = direct_db_answer(prompt, context.application.bot_data)
+        if direct_ans:
+            await say(update, direct_ans); return
+
     waiter = Waiting(update)
     waiter.start()
     try:
@@ -2008,6 +2571,33 @@ async def prepare_natural_transaction(update, context, result, prompt, previous=
     }
     context.application.bot_data.setdefault('natural_drafts', {}).pop(user_id, None)
     date_line = f'\nData: {db.short_date(str(occurred_date))}' if occurred_date else ''
+
+    # Proteção anti-duplicidade: se for despesa avulsa parecida com conta aberta próxima do vencimento, oferece dar baixa nela
+    matched_debt = db.find_matching_open_debt(description, category, amount) if kind == 'despesa' else None
+    if matched_debt:
+        due_amt = db.monthly_due_amount(matched_debt)
+        action['match_debt_id'] = matched_debt['id']
+        action['match_debt_title'] = matched_debt['title']
+        action['match_debt_amount'] = min(amount, matched_debt['original_amount'] - matched_debt['paid_amount'])
+        nonce = secrets.token_hex(8)
+        pending = context.application.bot_data.setdefault('natural_actions', {})
+        purge_expired(pending)
+        pending[nonce] = {'action': action, 'created_at': db.now().timestamp()}
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f'💳 Dar baixa em #{matched_debt["id"]} {matched_debt["title"][:16]} ({db.brl(action["match_debt_amount"])})', callback_data='nl:paydebt:' + nonce)],
+            [InlineKeyboardButton('➖ Lançar como gasto avulso à parte', callback_data='nl:confirm:' + nonce)],
+            [InlineKeyboardButton('Cancelar', callback_data='nl:cancel:' + nonce)],
+        ])
+        await _msg(update).reply_text(
+            f'⚠️ Atenção (evitar duplicidade):\n'
+            f'Você tem a conta em aberto #{matched_debt["id"]} “{matched_debt["title"]}” '
+            f'({db.brl(due_amt)}, vence {db.short_date(matched_debt["due_date"])}).\n\n'
+            f'Lançamento informado: Despesa {db.brl(amount)} | {category} — {description}{date_line}\n\n'
+            f'Deseja dar baixa nessa conta ou lançar como gasto avulso à parte?',
+            reply_markup=kb,
+        )
+        return
+
     await ask_action_confirmation(update, context, action,
         f'Confira antes de registrar:\n\nTipo: {kind.capitalize()}\nValor: {db.brl(amount)}\nCategoria: {category}\nDescrição: {description}{date_line}\n\nPosso salvar no seu histórico financeiro?')
 
@@ -2169,6 +2759,14 @@ async def dispatch_natural_query(update, context, query):
         await say(update, result_text)
         return True
 
+    # Guardrail: se o usuário perguntou por uma data específica ("dia 09/11", "nesse dia"), não despejar histórico genérico.
+    if str(query or '').strip().lower() == 'history':
+        bot_data = getattr(getattr(context, 'application', None), 'bot_data', None)
+        direct_ans = direct_db_answer(prompt, bot_data)
+        if direct_ans:
+            await say(update, direct_ans)
+            return True
+
     handlers = {
         'balance': balance, 'debts': debt_list, 'report': report,
         'history': history, 'plan': plan, 'reminders': reminder_list,
@@ -2194,7 +2792,7 @@ async def natural_action_callback(update, context):
         return
     pending = context.application.bot_data.setdefault('natural_actions', {})
     entry = pending.pop(nonce, None)
-    if prefix != 'nl' or decision not in ('confirm', 'cancel') or not entry:
+    if prefix != 'nl' or decision not in ('confirm', 'cancel', 'paydebt') or not entry:
         await query.edit_message_text('Confirmação vencida ou já utilizada. Nenhum registro foi feito.')
         return
     if db.now().timestamp() - entry.get('created_at', 0) > 600:
@@ -2206,6 +2804,19 @@ async def natural_action_callback(update, context):
 
     action = entry.get('action') or {}
     try:
+        if decision == 'paydebt' and action.get('match_debt_id'):
+            pay_amt = int(action['match_debt_amount'])
+            remaining = db.pay_debt(int(action['match_debt_id']), pay_amt, occurred_date=action.get('occurred_date'))
+            next_kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton('💳 Pagar outra conta', callback_data='mn:paylist:0'),
+                InlineKeyboardButton('📅 Ver contas', callback_data='mn:debts'),
+            ]])
+            await query.edit_message_text(
+                f'✅ Baixa registrada na conta “{action["match_debt_title"]}”: {db.brl(pay_amt)} (sem duplicar despesa).\n'
+                f'Restante: {db.brl(remaining)}\nSaldo histórico registrado: {db.brl(db.summary()["total"])}',
+                reply_markup=next_kb,
+            )
+            return
         action_type = action.get('type')
         if action_type == 'transaction':
             txid = db.insert_transaction(
@@ -2223,10 +2834,8 @@ async def natural_action_callback(update, context):
                 f'Vencimento: {db.short_date(action["due_date"])}')
         elif action_type == 'debt_installments':
             items = action.get('installments', [])
-            created_ids = []
             for item in items:
-                did = db.add_debt(int(item['amount']), item['due_date'], item['title'])
-                created_ids.append(did)
+                db.add_debt(int(item['amount']), item['due_date'], item['title'])
             tot_amt = sum(item['amount'] for item in items)
             await query.edit_message_text(
                 f'✅ {len(items)} parcelas cadastradas com sucesso para “{action["title"]}”!\n'
@@ -2279,6 +2888,25 @@ async def natural_action_callback(update, context):
             db.remove_fixed_income(int(action['inc_id']))
             await query.edit_message_text(
                 f'🗑️ Receita fixa #{action["inc_id"]} ({action.get("title", "")}) excluída.')
+        elif action_type == 'expected_income_add':
+            exp_id = db.add_expected_income(action['title'], int(action['amount']), action['expected_date'], action.get('category', 'Renda Extra'))
+            await query.edit_message_text(
+                f'✅ Receita a receber #{exp_id} agendada: {action["title"]} ({db.brl(action["amount"])}) para {db.short_date(action["expected_date"])}.')
+        elif action_type == 'expected_income_receive':
+            info = db.receive_expected_income(int(action['exp_id']))
+            await query.edit_message_text(
+                f'✅ Recebimento confirmado (#{info["tx_id"]}): {info["title"]} — {db.brl(info["amount"])}!\n'
+                f'Saldo histórico registrado: {db.brl(db.summary()["total"])}')
+        elif action_type == 'expected_income_delete':
+            db.remove_expected_income(int(action['exp_id']))
+            await query.edit_message_text(
+                f'🗑️ Receita a receber #{action["exp_id"]} ({action.get("title", "")}) excluída.')
+        elif action_type == 'debt_set_cap':
+            cap_c = int(action['cap_cents'])
+            db.set_debt_monthly_cap(int(action['debt_id']), cap_c)
+            desc_c = 'removido (cobrança integral)' if cap_c == 0 else f'definido em {db.brl(cap_c)}/mês'
+            await query.edit_message_text(
+                f'✅ Teto mensal da conta #{action["debt_id"]} ({action.get("title", "")}) {desc_c}!')
         elif action_type == 'tx_refund_debt':
             info = db.refund_debt_payment(int(action['tx_id']))
             await query.edit_message_text(
@@ -2697,13 +3325,13 @@ def main():
             'saldo':balance,'conta':debt_add,'dividas':debt_list,'pagar':pay,'historico':history,
             'relatorio':report,'planejar':plan,'lembrete':reminder_add,'hora':clock_cmd,'bateria':battery_cmd,
             'lembretes':reminder_list,'apagar_lembrete':reminder_delete,
-            'modelo':mode_set,'backup':backup,'resetar':reset_db_cmd,
+            'modelo':mode_set,'backup':backup,'resetar':reset_db_cmd,'limpar_chat':clear_chat_cmd,
             'corrigir_conta':debt_edit,'excluir_conta':debt_delete,'apagar':tx_delete,'estornar':tx_delete,
             'fixa':recurring_add,'fixas':recurring_list,'excluir_fixa':recurring_delete}
     for name, handler in routes.items():
         app.add_handler(CommandHandler(name,handler))
     app.add_handler(CallbackQueryHandler(payment_callback,pattern='^(pay|cancel):[a-f0-9]{16}$'))
-    app.add_handler(CallbackQueryHandler(natural_action_callback,pattern='^nl:(confirm|cancel):[a-f0-9]{16}$'))
+    app.add_handler(CallbackQueryHandler(natural_action_callback,pattern='^nl:(confirm|cancel|paydebt):[a-f0-9]{16}$'))
     app.add_handler(CallbackQueryHandler(alert_callback,pattern='^(rm:(h1|dy)|da:(pay|snz)):\\d+$'))
     app.add_handler(CallbackQueryHandler(mode_callback,pattern='^mode:(auto|rapido|avancado|gemini)$'))
     app.add_handler(CallbackQueryHandler(menu_callback,pattern='^mn:'))

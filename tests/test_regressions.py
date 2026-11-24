@@ -299,10 +299,11 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(d_updated['due_date'], '2026-12-30')
         self.assertEqual(db.get_debt_months(), ['2026-12'])
 
-        # Testa callback de receita rápida (mn:qinc:sal15)
+        # Testa callback dinâmico de receita fixa (mn:qinc_id:<id>)
+        sal15 = next(r for r in db.get_fixed_incomes() if r['amount'] == 93500)
         ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
         msg = SimpleNamespace(reply_text=mock.AsyncMock(), reply_document=mock.AsyncMock())
-        q = SimpleNamespace(data='mn:qinc:sal15', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+        q = SimpleNamespace(data=f'mn:qinc_id:{sal15["id"]}', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
         upd = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
                               effective_user=SimpleNamespace(id=1), message=None, callback_query=q)
         with mock.patch.object(bot, 'OWNER_ID', 1):
@@ -524,6 +525,159 @@ class RegressionTests(unittest.TestCase):
         debt_tx = db.get_transactions(1)[0]['id']
         with self.assertRaises(ValueError):
             db.update_transaction(debt_tx, amount=1000)
+
+    def test_date_queries_pagination_and_intramonth_cashflow_planning(self):
+        from datetime import datetime
+        from config import TZ
+        fixed_now = datetime(2026, 11, 23, 21, 0, tzinfo=TZ)
+        with mock.patch.object(db, 'now', lambda: fixed_now):
+            # 1. Ordenação cronológica real e consulta direta por data ("Somente dia 09/11" -> "Quero sabe oq paguei nesse dia")
+            db.insert_transaction('receita', 7000, 'Renda Fixa', 'Sistema Joaninha baby kids', '2026-11-09')
+            db.insert_transaction('despesa', 3500, 'Pagamento de dívida', 'Plano celular', '2026-11-09')
+            db.insert_transaction('despesa', 7500, 'Alimentação', 'Mercado', '2026-11-10')
+            db.insert_transaction('despesa', 749, 'Saúde', 'Poupe Ja', '2026-11-07')
+            txs = db.get_transactions(10)
+            dates = [t['occurred_at'][:10] for t in txs]
+            self.assertEqual(dates, sorted(dates, reverse=True))
+
+            bot_data = {}
+            ans1 = bot.direct_db_answer('Somente dia 09/11', bot_data)
+            self.assertIsNotNone(ans1)
+            self.assertIn('Plano celular', ans1)
+            self.assertIn('Sistema Joaninha', ans1)
+            ans2 = bot.direct_db_answer('Quero sabe oq paguei nesse dia', bot_data)
+            self.assertIsNotNone(ans2)
+            self.assertIn('Plano celular', ans2)
+            self.assertNotIn('Sistema Joaninha', ans2)
+
+            # 1b. Pergunta direta se conta já foi paga no mês (caso real do celular em 09/11)
+            did_cel = db.add_debt(3500, '2026-11-09', 'Plano celular')
+            db.pay_debt(did_cel, 3500, occurred_date='2026-11-09')
+            ans_cel = bot.direct_db_answer('Gastaria de saber se ja foi pago a conta do celular esse mes', bot_data)
+            self.assertIsNotNone(ans_cel)
+            self.assertIn('PAGA', ans_cel)
+            self.assertIn('09/11/2026', ans_cel)
+            self.assertIn('Contas/dívidas JÁ QUITADAS', db.ai_context())
+
+            # 2. Markdown limpa ### e ---
+            cleaned = bot.clean_telegram_markdown('---\n### Ação rápida\n• item')
+            self.assertNotIn('###', cleaned)
+            self.assertNotIn('---', cleaned)
+            self.assertIn('*Ação rápida*', cleaned)
+
+            # 3. Fluxo de caixa cronológico detecta falta de caixa antes do salário de 15/12 mesmo com saldo final positivo!
+            db.reset_all()
+            db.init()
+            # Em 23/11 o usuário tem R$ 100,00 em caixa e ainda vai receber salário dia 30/11 (R$ 830,00),
+            # e já recebeu R$ 935,00 (dia 15) e R$ 70,00 (dia 10) mas gastou R$ 905,00 em contas/avulsos.
+            db.insert_transaction('receita', 7000, 'Renda Fixa', 'Sistema Joaninha baby kids', '2026-11-09')
+            db.insert_transaction('receita', 93500, 'Salário', 'Salário (1ª parcela dia 15)', '2026-11-14')
+            db.insert_transaction('despesa', 90500, 'Alimentação', 'Gastos do mês', '2026-11-20')
+            # Sem contas restantes em 11/2026, mas com R$ 1.100,00 vencendo dia 06/12 (antes do salário de 15/12!)
+            db.add_debt(110000, '2026-12-06', 'Aluguel + Faturas Dez')
+
+            # Novembro ainda tem R$ 830,00 do dia 30/11 a entrar -> fecha 11/2026 com 100 + 830 = R$ 930,00
+            cp_nov = db.cumulative_planning('2026-11')
+            self.assertEqual(cp_nov['opening_balance'], 10000)
+            self.assertEqual(cp_nov['income_info']['remaining_fixed'], 83000)
+            self.assertEqual(cp_nov['closing_balance'], 93000)
+            # E já detecta o alerta de virada de Dezembro!
+            self.assertEqual(cp_nov['next_month'], '2026-12')
+            self.assertEqual(cp_nov['next_month_min_balance'], -17000)  # 930 - 1100 = -170 em 06/12
+            self.assertEqual(cp_nov['next_month_shortage'], 17000)
+
+            # Dezembro: saldo final é POSITIVO (930 + 1835 - 1100 = +1665), mas no dia 06/12 cai para -R$ 170,00!
+            cp_dec = db.cumulative_planning('2026-12')
+            self.assertEqual(cp_dec['opening_balance'], 93000)
+            self.assertEqual(cp_dec['closing_balance'], 166500)
+            self.assertEqual(cp_dec['min_balance'], -17000)
+            self.assertEqual(cp_dec['min_balance_date'], '2026-12-06')
+            self.assertEqual(cp_dec['shortage'], 17000)
+            self.assertEqual(cp_dec['before_day15_balance'], -10000)  # -170 em 06/12 + 70 em 10/12 = -100 antes do dia 15
+
+            # 4. Expiração da memória de conversa (mensagens > 2h não entram em last_messages)
+            with db.conn() as c:
+                c.execute("INSERT INTO messages(role, content, created_at) VALUES('user', 'antiga', '2026-11-20T10:00:00-03:00')")
+            db.remember('user', 'recente')
+            recent = db.last_messages(6)
+            self.assertEqual([m['content'] for m in recent], ['recente'])
+            db.clear_messages()
+            self.assertEqual(db.last_messages(6), [])
+
+    def test_five_precision_improvements(self):
+        from datetime import datetime
+        from config import TZ
+        fixed_now = datetime(2026, 11, 23, 21, 0, tzinfo=TZ)
+        with mock.patch.object(db, 'now', lambda: fixed_now):
+            # Setup base: saldo R$ 100 em 23/11, salário dia 30/11 (R$ 830) a entrar, conta de R$ 1.100 em 06/12
+            db.insert_transaction('receita', 7000, 'Renda Fixa', 'Sistema Joaninha baby kids', '2026-11-09')
+            db.insert_transaction('receita', 93500, 'Salário', 'Salário (1ª parcela dia 15)', '2026-11-14')
+            db.insert_transaction('despesa', 90500, 'Alimentação', 'Gastos do mês', '2026-11-20')
+            db.add_debt(110000, '2026-12-06', 'Aluguel + Faturas Dez')
+
+            # 1. Receita futura pontual (13º R$ 500 em 30/11) elimina o negativo de -R$ 170 em 06/12!
+            exp_id = db.add_expected_income('13º Salário', 50000, '2026-11-30', 'Salário')
+            cp_dec = db.cumulative_planning('2026-12')
+            self.assertEqual(cp_dec['opening_balance'], 143000)  # 100 + 830 + 500
+            self.assertEqual(cp_dec['min_balance'], 33000)       # 1430 - 1100 = +330!
+            self.assertEqual(cp_dec['shortage'], 0)
+            rec_info = db.receive_expected_income(exp_id)
+            self.assertEqual(rec_info['amount'], 50000)
+            self.assertEqual(db.get_expected_incomes(pending_only=True), [])
+
+            # 2. Orçamento de gastos avulsos (R$ 400/mês) calcula cenário prudente
+            db.set_variable_budget(40000)
+            cp_dec_b = db.cumulative_planning('2026-12')
+            self.assertEqual(cp_dec_b['variable_budget'], 40000)
+            self.assertEqual(cp_dec_b['prudent_closing_balance'], cp_dec_b['closing_balance'] - 40000)
+            db.set_variable_budget(0)
+
+            # 3. Teto mensal configurável em qualquer dívida (sem nome fixo no código)
+            dent_id = db.add_debt(60000, '2026-11-30', 'Dentista')
+            db.set_debt_monthly_cap(dent_id, 15000)
+            d_dent = next(d for d in db.get_debts() if d['id'] == dent_id)
+            self.assertEqual(db.monthly_due_amount(d_dent), 15000)
+            proj_dec = db.project_month_debts('2026-12')
+            dent_dec = next(x for x in proj_dec if x['title'] == 'Dentista')
+            self.assertEqual(dent_dec['monthly_due'], 15000)
+
+            # 4. Anti-duplicidade: despesa avulsa "Combustível pro carro" detecta ficha aberta "Combustível" e dá baixa via nl:paydebt
+            comb_id = db.add_debt(2000, '2026-11-23', 'Combustível')
+            match = db.find_matching_open_debt('Combustível pro carro', 'Transporte', 2000)
+            self.assertIsNotNone(match)
+            self.assertEqual(match['id'], comb_id)
+            ctx = SimpleNamespace(application=SimpleNamespace(bot_data={}), args=[])
+            msg = SimpleNamespace(reply_text=mock.AsyncMock())
+            upd = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                  effective_user=SimpleNamespace(id=1), message=msg, callback_query=None)
+            asyncio.run(bot.prepare_natural_transaction(
+                upd, ctx,
+                {'kind': 'despesa', 'amount': '20.00', 'category': 'Transporte', 'description': 'Combustível pro carro'},
+                'Gastei 20 de combustível pro carro',
+            ))
+            nonce = next(iter(ctx.application.bot_data['natural_actions']))
+            q_pay = SimpleNamespace(data=f'nl:paydebt:{nonce}', message=msg, answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+            upd_q = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                    effective_user=SimpleNamespace(id=1), message=None, callback_query=q_pay)
+            with mock.patch.object(bot, 'OWNER_ID', 1):
+                asyncio.run(bot.natural_action_callback(upd_q, ctx))
+            self.assertFalse(any(d['id'] == comb_id for d in db.get_debts(open_only=True)))
+
+            # 5. Simulador determinístico ("Posso gastar 200 hoje?" / "Posso parcelar 600 em 3x?") + Conferência de saldo
+            sim_ans = bot.direct_db_answer('Posso parcelar 600 em 3x dia 10?', {})
+            self.assertIsNotNone(sim_ans)
+            self.assertIn('SIMULAÇÃO', sim_ans)
+            self.assertIn('3x', sim_ans)
+
+            # Conferência de saldo real
+            ctx.application.bot_data['edit_debt_state'] = {1: {'mode': 'reconcile', 'updated_at': fixed_now.timestamp()}}
+            cur_bal = db.summary()['total']
+            msg_rec = SimpleNamespace(text=f'{(cur_bal + 2500) / 100:.2f}'.replace('.', ','), reply_text=mock.AsyncMock())
+            upd_rec = SimpleNamespace(effective_chat=SimpleNamespace(type=bot.ChatType.PRIVATE),
+                                      effective_user=SimpleNamespace(id=1), message=msg_rec, callback_query=None)
+            with mock.patch.object(bot, 'OWNER_ID', 1):
+                asyncio.run(bot.chat(upd_rec, ctx))
+            self.assertIn('Ajuste de Saldo', msg_rec.reply_text.call_args.args[0])
 
 
 if __name__ == '__main__':
